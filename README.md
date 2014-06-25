@@ -105,7 +105,7 @@ Script Dependencies:
   - 1. png.js / zlib.js -- entirely optional, but recommended.  Significantly improves performance over HTML5 Canvas.
 
 
-(png.js / zlib.js source: http:github.com/devongovett/png.js/ )
+(png.js / zlib.js source: http://github.com/devongovett/png.js/ )
 
 
 ##Stuff it will probably work on:
