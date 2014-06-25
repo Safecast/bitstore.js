@@ -49,7 +49,7 @@ By doing nothing at all.  As it turns out, you can do nothing pretty quickly.
 It will detect this via the server's Last-Modified datetime in an intial HTTP get header request.  You can also specify a callback function to use this date in your UI.
 
 ##Where did this come from?
-This is a spin-off from development efforts in mapping the Safecast dataset (safecast.org), of volunteer-collected measurements of radiation data.
+This is a spin-off from development efforts in mapping the Safecast dataset (http://safecast.org), of volunteer-collected measurements of radiation data.
 
 Bitmap indexing was first implemented in C on iOS as a result of code profiling showing the tremendous amount of time spent trying to load data that wasn't there.
 
@@ -76,7 +76,7 @@ Each index tile can be used for an additional 8 zoom levels before false positiv
 Realistically, you probably don't want to make the client download more than a couple MB of tiles to index.  But the indices are cached, so if you have a consistent userbase, you can be more aggressive as the indices will only be created once.
 
 ##How should I use the lazy loading modes?
-As not lazily as possible.  I prefer to stick the loading costs up front.  With multithreading enabled, web workers will oversubscribe concurrent HTTP connections whichis a very efficient way to maximize data transfer efficiency.
+As not lazily as possible.  I prefer to stick the loading costs up front.  With multithreading enabled, web workers will oversubscribe concurrent HTTP connections which is a very efficient way to maximize data transfer efficiency.
 Users don't tend to immediately pan the map, so you get at least a couple seconds of this.
 
 The full lazy load model doesn't work with multithreading, blocks on the main thread, suffers from cache misses until the async HTTP GETs go through, and in general makes using the map less pleasant.
@@ -135,6 +135,8 @@ Single file solution.  100% pure vanilla standards-compliant JavaScript.
 1. Instantiate with constructor at startup:
 ===
 
+It puts the code in the init function or it gets the bucket again.
+
 ##Basic Configuration:
 
     MY_FIRST_BARBIE_GLOBAL_POINTER = new LBITS(2, 0, 16, "http://safecast.org/tilemap/tiles/{z}/tile_{z}_{x}_{y}.png", 0, 0, null, null);
@@ -166,7 +168,7 @@ Single file solution.  100% pure vanilla standards-compliant JavaScript.
                   }
 
 
-(note: getNormalizedCoord can be found here: http://developers.google.com/maps/documentation/javascript/maptypes )
+(note: getNormalizedCoord can be found here: http://developers.google.com/maps/documentation/javascript/maptypes ... this is optional, but if you send extent checks which are out of the bounds of the coordinate system, it will always return false, which is the expected behavior.)
 
 
 ##Maintenance Requirements
