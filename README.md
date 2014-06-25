@@ -248,13 +248,13 @@ Replace the original lines with the following:
 
      Line         New Code                      Comment
     ------------ --------------------------    ------------------------------------------------------------------------
-     - Line 25:   (function() {                Disable the outer function wrapper, kill the "window" dependancy.
-     - Line 26:     var PNG;                   Disable the outer function wrapper, kill the "window" dependancy.
+     - Line 25:   //(function() {              Disable the outer function wrapper, kill the "window" dependancy.
+     - Line 26:   //  var PNG;                 Disable the outer function wrapper, kill the "window" dependancy.
      - Line 28:   var PNG = (function() {      Rework the inner function wrapper to be stand-alone.
      - Line 361:  scratchCanvas = null;        Disable all explicit Canvas refs on init, kill the "document" dependancy.
      - Line 362:  scratchCtx = null;           Disable all explicit Canvas refs on init, kill the "document" dependancy.
-     - Line 457:  window.PNG = PNG;            Disable the outer function wrapper, kill the "window" dependancy.
-     - Line 459:  }).call(this);               Disable the outer function wrapper, kill the "window" dependancy.
+     - Line 457:  //window.PNG = PNG;          Disable the outer function wrapper, kill the "window" dependancy.
+     - Line 459:  //}).call(this);             Disable the outer function wrapper, kill the "window" dependancy.
 
 This will remove the references to document and window, which are verboten in a background web worker.  However, it will also break all the functionality in png.js that uses those features, so it is recommended to keep the original.
 
