@@ -197,6 +197,8 @@ But, if you wanted a more visual reprsentation, there is a function included for
                     
 This returns a new UInt8Array with 64k elements (a 256x256 image), which can be converted into an image via HTML5 Canvas's putImageData or similar (lib_bmp.js, etc).
 
+Another approach to just test the net effect it has is to embed a global counter variable in getTileUrl and track how many loads it prevented.  Or, instead of returning null upon false from getTileUrl, one could return a URL to an obviously static 256x256 image (eg http://safecast.org/tilemap/dogetile2.png ).
+
 
 
 ##Optional Components
