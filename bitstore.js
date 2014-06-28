@@ -102,7 +102,10 @@
 //
 // 
 
-
+// 2014-06-27 ND: most processing now can happen in web workers.
+//                inlined bit tests, better loop unrolls for non-p2s, fix for max idx z not being enforced.
+//                move try/catch blocks to own functions so they don't block V8 optimizations.
+//                now purges old caches for a layer.
 // 2014-06-23 ND: changed alt lazy load mode to force load on first access, regardless of zoom level.  also will queue if master not done.
 // 2014-06-22 ND: bugfix: typo in min tile x/y input sanity check
 // 2014-06-22 ND: bugfix: copypasta typos in layer extent iterative refinement step
@@ -128,7 +131,7 @@ var LBITSOptions = (function()
         this.net_url_append_enable  = true;
 
         this.idx_max_bitmap_n       = 256;
-        this.idx_max_bitmap_z       = 6;
+        this.idx_max_bitmap_z       = 8;
         this.idx_datecheck_enable   = true;
         this.idx_lazyload_detail    = true;
         this.idx_lazyload_dim       = true;
@@ -151,7 +154,7 @@ var LBITSOptions = (function()
         this.hex   = true;
         this.appnd = true;
         this.maxn  = 256;
-        this.maxz  = 6;
+        this.maxz  = 8;
         this.date  = true;
         this.ll    = true;
         this.lldim = true;
@@ -196,7 +199,7 @@ var LBITSOptions = (function()
         this.net_src_hex_format    |= this.hex;
         this.net_url_append_enable  = this.net_url_append_enable && this.appnd;
         this.idx_max_bitmap_n       = this.maxn != 256 ? this.maxn : this.idx_max_bitmap_n;
-        this.idx_max_bitmap_z       = this.maxz !=   6 ? this.maxz : this.idx_max_bitmap_z;
+        this.idx_max_bitmap_z       = this.maxz !=   8 ? this.maxz : this.idx_max_bitmap_z;
         this.idx_datecheck_enable   = this.idx_datecheck_enable  && this.date;
         this.idx_lazyload_detail    = this.idx_lazyload_detail   && this.ll;
         this.idx_lazyload_dim       = this.idx_lazyload_dim      && this.lldim;
@@ -288,7 +291,7 @@ var LBITS = (function()
         this.net_url_append_enable   = true;
 
         this.idx_max_bitmap_n        = 256;
-        this.idx_max_bitmap_z        = 6;
+        this.idx_max_bitmap_z        = 8;
         this.idx_datecheck_enable    = true;
         this.idx_lazyload_detail     = true;
         this.idx_lazyload_dim        = true;
@@ -300,20 +303,11 @@ var LBITS = (function()
         this.img_ch_offset           = 3;
         this.img_alpha_threshold     = 1;
   
-        
-        var has_libpng       = false; // temp / constructor only
-        var requested_libpng = false; // temp / constructor only
-        var requested_multi  = false; // temp / constructor only
-        
-        try
-        {
-            has_libpng = PNG != null;
-        }//try
-        catch(err)
-        {
-            has_libpng = false;
-        }//catch
-        
+        // temp / constructor only
+        var has_libpng       =  this.Has_libpng(); 
+        var requested_libpng = false;
+        var requested_multi  = false;
+               
         if (!has_libpng) this.img_io_canvas_enable = true;
         
         
@@ -373,12 +367,12 @@ var LBITS = (function()
                 reason = "Reason(s) unknown.";
             }
             
-            console.log("LBITS: init: Warning: Requested multithreading not enabled.  Reason: %s", reason);
+            console.log("LBITS: [%d] init: Warning: Requested multithreading not enabled.  Reason: %s", this.layerId, reason);
         }//if
         
         if (requested_libpng && !has_libpng && this._log)
         {
-            console.log("LBITS: init: Warning: Requested libpng aka png.js not found.  Using HTML5 Canvas fallback with degraded performance.");
+            console.log("LBITS: [%d] init: Warning: Requested libpng aka png.js not found.  Using HTML5 Canvas fallback with degraded performance.", this.layerId);
         }//if
         
         this._log             = false;
@@ -392,21 +386,36 @@ var LBITS = (function()
             this.CreateWorker();
         }//if        
         
-        if (this._log) console.log("LBITS: init: layerId=%d, minZ=%d, maxZ=%d, x=%d, y=%d, urlTemplate=%s", layerId, minZ, maxZ, x, y, urlTemplate);
-        if (this._log) console.log("LBITS: init: GET specified master index tile...");
+        if (this._log) console.log("LBITS: [%d] init: layerId=%d, minZ=%d, maxZ=%d, x=%d, y=%d, urlTemplate=%s.  Getting master...", this.layerId, layerId, minZ, maxZ, x, y, urlTemplate);
         
         if (this.urlTemplate != null)
         {
             if (this.idx_datecheck_enable)
             {
-                this.GetLastModifiedHeaderAsync(this.GetTileURL(x,y,this.minZ), x,y,this.minZ, dateStringCallback);
+                this.GetLastModifiedHeaderAsync(this.GetTileURL(x, y, this.minZ), x, y, this.minZ, dateStringCallback);
             }//if
             else
             {
-                this.GetAsync_Any(x,y,this.minZ,true);
+                this.GetAsync_Any(x, y, this.minZ, true);
             }//else
         }//if
     }
+    
+    LBITS.prototype.Has_libpng = function()
+    {
+        var has_libpng = false;
+    
+        try
+        {
+            has_libpng = PNG != null;
+        }//try
+        catch(err)
+        {
+            has_libpng = false;
+        }//catch
+        
+        return has_libpng;
+    };
     
     
     
@@ -438,35 +447,66 @@ var LBITS = (function()
         var sauce;
         
         sauce = "self.onmessage = function(e)"
-              + "{"
-              +     "var data = e.data;"
-              
-              +     "if (data.baseurl) "
+              + "{"              
+              +     "if (e.data.op == 'INCLUDE') "
               +     "{"
-              +         "try"
-              +         "{"
-              +             (inc0 != null ? inc0 : "")
-              +             (inc1 != null ? inc1 : "")
-              +             (inc2 != null ? inc2 : "")
-              +         "}"
-              +         "catch(err)"
-              +         "{"
-              +             "self.postMessage({libs:'baseurl'});"
-              +         "}"
+              +         "self.exec_include(e);"
               +     "}"
-              +     "else if (e.data.url && e.data.userData)"
+              +     "else if (e.data.op == 'GET_BITS')"
               +     "{"
               +         "var cb = function(response, userData)"
               +         "{"
               +             "var rgba   = LBITS.GetNewRGBA8888_FromPNG_libpng(response);"
               +             "var bs_u16 = BITS.GetBitmapFromRGBA8888Tile(rgba, userData[4], userData[5], userData[6], userData[7]);"
-              +             "self.postMessage({user:userData,ab:bs_u16.buffer}, [bs_u16.buffer]);"
+              +             "self.postMessage({op:e.data.op, user:userData, ab:bs_u16.buffer}, [bs_u16.buffer]);"
               +         "};"
-              
               +         "LBITS.GetAsync_HTTP(e.data.url, 'arraybuffer', null, cb, e.data.userData); "
               +     "}"
-              + "};";
+              +     "else if (e.data.op == 'GET_BITS_IV')"
+              +     "{"
+              +         "var cb = function(response, userData)"
+              +         "{"
+              +             "var rgba   = LBITS.GetNewRGBA8888_FromPNG_libpng(response);"
+              +             "var bs_u16 = BITS.GetBitmapFromRGBA8888Tile(rgba, userData[4], userData[5], userData[6], userData[7]);"
+              +             "var ivs    = BITS.c_DecomposeIndexIntoIV(bs_u16);"
+              +             "self.postMessage({op:e.data.op, ivs0:ivs[0], ivs1:ivs[1], user:userData, ab:bs_u16.buffer}, [bs_u16.buffer]);"
+              +         "};"
+              +         "LBITS.GetAsync_HTTP(e.data.url, 'arraybuffer', null, cb, e.data.userData); "
+              +     "}"
+              +     "else if (e.data.op == 'GET_BITS_IV_E')"
+              +     "{"
+              +         "var cb = function(response, userData)"
+              +         "{"
+              +             "var rgba   = LBITS.GetNewRGBA8888_FromPNG_libpng(response);"
+              +             "var bs_u16 = BITS.GetBitmapFromRGBA8888Tile(rgba, userData[4], userData[5], userData[6], userData[7]);"
+              +             "var ivs    = BITS.c_DecomposeIndexIntoIV(bs_u16);"
+              +             "var ex_u32 = BITS.c_GetPixelExtentFromBitstore(bs_u16, userData[0],userData[1],userData[2]);"
+              +             "self.postMessage({op:e.data.op, ivs0:ivs[0], ivs1:ivs[1], user:userData, ab:bs_u16.buffer, ex:ex_u32.buffer}, [bs_u16.buffer, ex_u32.buffer]);"
+              +         "};"
+              +         "LBITS.GetAsync_HTTP(e.data.url, 'arraybuffer', null, cb, e.data.userData); "
+              +     "}"
+              +     "else if (e.data.op == 'IV_BITS_E')"
+              +     "{"
+              +         "var bs_u16 = LBITS.DecodeBitmapIndexFromHexString(e.data.userData[4], null);"
+              +         "e.data.userData[4] = null;"
+              +         "var ex_u32 = BITS.c_GetPixelExtentFromBitstore(bs_u16, e.data.userData[0], e.data.userData[1], e.data.userData[2]);"
+              +         "self.postMessage({op:e.data.op, user:e.data.userData, ab:bs_u16.buffer, ex:ex_u32.buffer}, [bs_u16.buffer, ex_u32.buffer]);"
+              +     "}"
+              + "};"
               
+              + "self.exec_include = function(e)"
+              + "{"
+              +     "try"
+              +     "{"
+              +          (inc0 != null ? inc0 : "")
+              +          (inc1 != null ? inc1 : "")
+              +          (inc2 != null ? inc2 : "")
+              +     "}"
+              +     "catch(err)"
+              +     "{"
+              +         "self.postMessage({op:e.data.op});"
+              +     "}"
+              + "};";
         
         try
         {
@@ -478,38 +518,52 @@ var LBITS = (function()
             // a PNG, and convert it to a uint16_t* bitmap index buffer.
             this._worker.onmessage = function(e) 
             {
-                if (e.data.user)
+                if (e.data.op == "GET_BITS" || e.data.op == "GET_BITS_IV" || e.data.op == "GET_BITS_IV_E" || e.data.op == "IV_BITS_E")
                 {
                     var userData = e.data.user;
                     var bits     = new Uint16Array(e.data.ab);
+                    var needExt  = true;
                     
-                    if (bits != null && this.net_cache_enable)
+                    if (e.data.ivs0 != null && e.data.ivs1 != null) // GET_BITS_IV, GET_BITS_IV_E
                     {
-                        var ivs = BITS.c_DecomposeIndexIntoIV(bits); // <1 ms so not sure if worth copy time
+                        this.StorageSet(this.GetStorageKey(userData[0], userData[1], userData[2]), e.data.ivs0, e.data.ivs1);
+                    }//if
+                    else if (this.net_cache_enable && e.data.op == "GET_BITS")
+                    {
+                        var ivs = BITS.c_DecomposeIndexIntoIV(bits);
                         this.StorageSet(this.GetStorageKey(userData[0],userData[1],userData[2]), ivs[0], ivs[1]);  
+                    }//else if
+                    
+                    if (e.data.ex != null) //GET_BITS_IV_E, IV_BITS_E
+                    {
+                        needExt    = false;
+                        var px_ext = new Uint32Array(e.data.ex);
+                        this.UpdateLayerExtentFromBitstorePixelExtent(px_ext);
                     }//if
                     
-                    this.AddBitstoreFromBitmapIndex(bits, userData[0], userData[1], userData[2], userData[3]);
+                    this.AddBitstoreFromBitmapIndex(bits, userData[0], userData[1], userData[2], userData[3], needExt);
                 }//if
-                else if (e.data.libs)
+                else if (e.data.op == "INCLUDE")
                 {
-                    console.log("LBITS.CreateWorker: ERROR: Worker thread could not load png.js, zlib.js and/or bitstore.js.  Multithreading disabled.");
+                    console.log("LBITS.CreateWorker: [%d] ERR: Worker thread could not load png.js, zlib.js and/or bitstore.js.  Multithreading disabled.", this.layerId);
                     this.net_multithreading = false;
                 }//else if
             }.bind(this);
         
-            var baseurl = "" + document.location.href;
-            this._worker.postMessage({baseurl: baseurl});
+            this.WorkerDispatchAsync("INCLUDE", null, null);
         }//try
         catch(err)
         {
-            console.log("LBITS.CreateWorker: ERROR: An unknown fatal error occurred while creating the worker. Multithreading disabled.");
+            console.log("LBITS.CreateWorker: [%d] ERR: An unknown fatal error occurred while creating the worker. Multithreading disabled.", this.layerId);
             this.net_multithreading = false;
         }//catch
     };
     
-    
-
+//- (void)
+    LBITS.prototype.WorkerDispatchAsync = function(op, url, userData)
+    {
+        this._worker.postMessage({op:op, url:url, userData:userData});
+    };
     
     
     
@@ -520,7 +574,7 @@ var LBITS = (function()
 // ******************************************************************************************************
 
 //- (BITS*)
-    LBITS.prototype.FindBitstoreWithXYZ = function(x,y,z)
+    LBITS.prototype.FindBitstoreWithXYZ = function(x, y, z)
     {
         var bs = null;
     
@@ -528,7 +582,7 @@ var LBITS = (function()
         {
             if (   (x == -1 || this.bitstores[i].x == x)
                 && (y == -1 || this.bitstores[i].y == y)
-                && this.bitstores[i].z == z)
+                &&             this.bitstores[i].z == z)
             {
                 bs = this.bitstores[i];
                 break;
@@ -596,19 +650,19 @@ var LBITS = (function()
                 
                 if (bs.needProc)
                 {
-                    if (bs.tempData == null) if (this._log) console.log("wanted proc but no temp buffer!");
+                    if (bs.tempData == null) if (this._log) console.log("LBITS.ForceLoadHusks: [%d] BITS wanted proc but no temp buffer.", this.layerId);
                 
-                    neededProc = true;
-                    bs.needProc = false;
+                    neededProc   = true;
+                    bs.needProc  = false;
                     bs.SetBitmapFromCachedRGBA8888();
-                    bs.tempData = null;
+                    bs.tempData  = null;
                     didSomething = true;
                 }//if
                 
                 if (neededProc && !bs.needProc)
                 {
                     var ivs = bs.DecomposeIndexIntoIV();
-                    if (ivs != null) this.StorageSet(this.GetStorageKey(bs.x,bs.y,bs.z), ivs[0], ivs[1]);
+                    if (ivs != null) this.StorageSet(this.GetStorageKey(bs.x, bs.y, bs.z), ivs[0], ivs[1]);
                 }//if
             }//for
         }//if
@@ -628,35 +682,38 @@ var LBITS = (function()
         {
             if (this.idx_lazyload_detail && !this._didLazyLoad) { this.FinishLazyLoadInit(); }//if // z > this.minZ + 8
         
-            shouldLoad = this.minZ <= z && z <= this.maxZ && x >= 0 && y >= 0 && x < (1<<z) && y < (1<<z) && this.IsTileInExtent(x,y,z,extent_u32);
+            shouldLoad = this.minZ <= z && z <= this.maxZ && x >= 0 && y >= 0 && x < (1<<z) && y < (1<<z) && this.IsTileInExtent(x, y, z, extent_u32);
             
             var neededProc = false;
+            var bs         = null;
             
             for (var i=0; i<this.bitstores.length; i=(i+1)|0)
             {
+                bs = this.bitstores[i];
+            
                 //<LazyLoad>
                 if (this.idx_lazyload_detail && !this.idx_lazyload_dim)
                 {                
-                    if (this.bitstores[i].needGet && !this.bitstores[i].getting && this.bitstores[i].CanIndexTile(x,y,z,extent_u32))
+                    if (bs.needGet && !bs[i].getting && bs[i].CanIndexTile(x, y, z, extent_u32))
                     {
-                        this.bitstores[i].getting = true;
-                        this.GetAsync_Any(this.bitstores[i].x,this.bitstores[i].y,this.bitstores[i].z,false);
+                        bs.getting = true;
+                        this.GetAsync_Any(bs.x, bs.y, bs.z, false);
                         return true; // this is why lazy loading everything isn't a good idea.
                     }//if
                     
-                    neededProc = this.bitstores[i].needProc;
+                    neededProc = bs.needProc;
                 }//if
                 //</LazyLoad>
             
-                shouldLoad = shouldLoad && this.bitstores[i].ShouldLoadTile(layerId,x,y,z, extent_u32);
+                shouldLoad = shouldLoad && bs.ShouldLoadTile(layerId,x,y,z, extent_u32);
             
                 //<LazyLoad>
                 if (this.idx_lazyload_detail && !this.idx_lazyload_dim)
                 {
-                    if (neededProc && !this.bitstores[i].needProc)
+                    if (neededProc && !bs.needProc)
                     {
-                        var ivs = this.bitstores[i].DecomposeIndexIntoIV();
-                        this.StorageSet(this.GetStorageKey(this.bitstores[i].x,this.bitstores[i].y,this.bitstores[i].z), ivs[0], ivs[1]);
+                        var ivs = bs.DecomposeIndexIntoIV();
+                        this.StorageSet(this.GetStorageKey(bs.x, bs.y, bs.z), ivs[0], ivs[1]);
                     }//if
                 }//if
                 //</LazyLoad>
@@ -734,15 +791,15 @@ var LBITS = (function()
 
     
 //- (void)            Callback after cache hit
-    LBITS.prototype.AddBitstoreFromBitmapIndex = function(bits, x, y, z, shouldAutoload)
+    LBITS.prototype.AddBitstoreFromBitmapIndex = function(bits, x, y, z, shouldAutoload, shouldUpdateExtent)
     {
         if (this.idx_lazyload_detail && !this.idx_lazyload_dim && z > this.minZ)
         {
-            this.AddBitstoreFromBitmapIndex_WithLazyLoad(bits, x, y, z);
+            this.AddBitstoreFromBitmapIndex_WithLazyLoad(bits, x, y, z, shouldUpdateExtent);
         }//if
         else
         {
-            this.AddBitstoreFromBitmapIndex_NoLazyLoad(bits, x, y, z);
+            this.AddBitstoreFromBitmapIndex_NoLazyLoad(bits, x, y, z, shouldUpdateExtent);
         }//else
         
         if (z == this.minZ && this._log) console.log("LBITS.AddBitstoreFromRGBA8888: [%d]: Added master bitstore.", this.layerId);
@@ -751,7 +808,7 @@ var LBITS = (function()
         {
             if (!this.idx_lazyload_detail || this._wantedForceLoad)
             {
-                if (this._log) console.log("LBITS.AddBitstoreFromBitmapIndex: Autoloading rest of indices (if needed).");
+                if (this._log) console.log("LBITS.AddBitstoreFromBitmapIndex: [%d] Autoloading rest of indices (if needed).", this.layerId);
                 
                 if (this._wantedForceLoad)
                 {
@@ -767,19 +824,22 @@ var LBITS = (function()
     };
     
 //- (void)
-    LBITS.prototype.AddBitstoreFromBitmapIndex_NoLazyLoad = function(bits, x, y, z)
+    LBITS.prototype.AddBitstoreFromBitmapIndex_NoLazyLoad = function(bits, x, y, z, shouldUpdateExtent)
     {
         var bs = new BITS(this.layerId, x, y, z, bits, true);
         this.bitstores.push(bs);
-            
-        var px_extent = bs.GetPixelExtentFromBitstore();
-        this.UpdateLayerExtentFromBitstorePixelExtent(px_extent);
+        
+        if (shouldUpdateExtent)
+        {
+            var px_extent = bs.GetPixelExtentFromBitstore();
+            this.UpdateLayerExtentFromBitstorePixelExtent(px_extent);
+        }//if
         
         bs.isReady = true;
     };
     
 //- (void)
-    LBITS.prototype.AddBitstoreFromBitmapIndex_WithLazyLoad = function(bits, x, y, z)
+    LBITS.prototype.AddBitstoreFromBitmapIndex_WithLazyLoad = function(bits, x, y, z, shouldUpdateExtent)
     {
         var bs = this.FindBitstoreWithXYZ(x,y,z);
         
@@ -789,7 +849,7 @@ var LBITS = (function()
             bs.getting = false;
             bs.data    = bits;
             
-            if (z == this.minZ)
+            if (shouldUpdateExtent && z == this.minZ)
             {
                 var px_extent = bs.GetPixelExtentFromBitstore();
                 this.UpdateLayerExtentFromBitstorePixelExtent(px_extent);
@@ -825,7 +885,7 @@ var LBITS = (function()
         {
             if (!this.idx_lazyload_detail || this._wantedForceLoad)
             {
-                if (this._log) console.log("LBITS.AddBitstoreFromRGBA8888: Autoloading rest of indices (if needed).");
+                if (this._log) console.log("LBITS.AddBitstoreFromRGBA8888: [%d] Autoloading rest of indices (if needed).", this.layerId);
 
                 if (this._wantedForceLoad)
                 {
@@ -873,7 +933,7 @@ var LBITS = (function()
         }//if
         else
         {
-            if (this._log) console.log("LBITS.AddBitstoreFromRGBA8888: err: couldn't match lazyload [%d] %d, %d @ %d", this.layerId, x, y, z);
+            if (this._log) console.log("LBITS.AddBitstoreFromRGBA8888: [%d] ERR: couldn't match lazyload (%d, %d) @ %d", this.layerId, x, y, z);
         }//else
     };
     
@@ -921,7 +981,7 @@ var LBITS = (function()
             }//if
             else
             {
-                if (this._log) console.log("LBITS.AddAllDefaultBitstores: multiResults were NULL.");
+                if (this._log) console.log("LBITS.AddAllDefaultBitstores: [%d] multiResults were NULL.", this.layerId);
             }//else
         }//if
     };
@@ -936,12 +996,12 @@ var LBITS = (function()
         if (this.maxZ > 8)                      // Hard way: see if entire extent fits into some nice little tile somewhere.
         {
             var newZ,i,px0,px1,py0,py1,px_extent=null;
-            var bs = this.FindBitstoreWithXYZ(-1,-1,this.minZ);
+            var bs = this.FindBitstoreWithXYZ(-1, -1, this.minZ);
             
             if (bs != null)
             {
                 px_extent = bs.GetPixelExtentFromBitstore();
-                BITS.c_vPixelExtentToMercExtent_u32(px_extent);
+                BITS.c_vPixelExtentToMercExtent_u32(px_extent); // use actual pixel extent instead of gross tile extent
             }//if
 
             newZ        = this.maxZ - 8;
@@ -954,7 +1014,7 @@ var LBITS = (function()
             // Iterate through and attempt extent matches... this allows for a "not 1:1, but better than z=0" result.
             for (i = newZ; i > this.minZ; i--)
             {
-                px0 = BITS.c_MercXZtoMercXZ(px_extent[0], px_extent[4], i); // was: <<8
+                px0 = BITS.c_MercXZtoMercXZ(px_extent[0], px_extent[4], i);
                 py0 = BITS.c_MercXZtoMercXZ(px_extent[1], px_extent[4], i);
                 px1 = BITS.c_MercXZtoMercXZ(px_extent[2], px_extent[4], i);
                 py1 = BITS.c_MercXZtoMercXZ(px_extent[3], px_extent[4], i);
@@ -969,15 +1029,15 @@ var LBITS = (function()
                 }//if
                 else
                 {
-                    diff = Math.sqrt((px1-px0)*(px1-px0)+(py1-py0)*(py1-py0));
+                    diff = Math.sqrt((px1 - px0) * (px1 - px0) + (py1 - py0) * (py1 - py0)); // pythag
                     
                     if (diff < bestDiff)
                     {
                         bestDiff = diff;
-                        _xOut = px0 >>> 8;
-                        _yOut = py0 >>> 8;
-                        _zOut = i;
-                        if (this._log) console.log("[%d] [%d] Diff: %d ... Best: %d... (pxD: %d, pyD: %d)... (%d, %d - %d, %d)", this.layerId, i, diff, bestDiff, px1-px0, py1-py0, px0, py0, px1, py1);
+                        _xOut    = px0 >>> 8;
+                        _yOut    = py0 >>> 8;
+                        _zOut    = i;
+                        //if (this._log) console.log("LBITS.FindOptimalSingleIndex: -- [%d] [%d] Diff: %d ... Best: %d... (pxD: %d, pyD: %d)... (%d, %d - %d, %d)", this.layerId, i, diff, bestDiff, px1-px0, py1-py0, px0, py0, px1, py1);
                     }//if
                 }//else
             }//for
@@ -995,7 +1055,7 @@ var LBITS = (function()
     LBITS.prototype.QueryMultiTXYs = function()
     {
         var xs = null, ys = null, uberX = 0, uberY = 0;//, destXs = null, destYs = null;
-        var destZ = this.QueryMultiTXYs_GetInitialDestZ();
+        var destZ  = this.QueryMultiTXYs_GetInitialDestZ();
         var xyPack = this.GetXYZsForBitstore_GetMasterTileXYsAndOrigin();
         
         if (destZ < 0 || xyPack == null)
@@ -1017,7 +1077,14 @@ var LBITS = (function()
         {
             unique_n = this.QueryMultiTXYs_DistinctTXYsforPXYs(uberX,uberY,xs,ys,txs,tys,destZ);
 
-            if (unique_n <= this.idx_max_bitmap_n || destZ <= this.minZ+1) break;
+            if (unique_n <= this.idx_max_bitmap_n || destZ <= this.minZ+1) 
+            {
+                break;
+            }//if
+            else
+            {
+                if (this._log) console.log("LBITS.QueryMultiTXYs: [%d] Distinct tiles: %d > %d @ %d.  Retrying @ %d.", this.layerId, unique_n, this.idx_max_bitmap_n, destZ-1);
+            }//else
 
             destZ--;
         }//while
@@ -1038,19 +1105,26 @@ var LBITS = (function()
         
         if (this.hasCompleteSingleIndex || this.maxZ <= 8)
         {
-            if (this._log) console.log("LBITS.QueryMultiTXYs:  Already indexed, nothing to do.  Abort.");
+            if (this._log) console.log("LBITS.QueryMultiTXYs: [%d] Already indexed, nothing to do.  Abort.", this.layerId);
             destZ = -1;
         }//if
+        
         if (this.idx_max_bitmap_n == 1)
         {
-            if (this._log) console.log("LBITS.QueryMultiTXYs:  One tile, nothing to do.  Abort.");
+            if (this._log) console.log("LBITS.QueryMultiTXYs: [%d] One tile, nothing to do.  Abort.", this.layerId);
             destZ = -1;
+        }//if
+        
+        if (destZ > this.idx_max_bitmap_z)
+        {
+            if (this._log) console.log("LBITS.QueryMultiTXYs: [%d] Clamping destZ=%d to max idx z=%d.", this.layerId, destZ, this.idx_max_bitmap_z);
+            destZ = this.idx_max_bitmap_z;
         }//if
         
         if (destZ > -1 && this._log)
         {
-            console.log("LBITS.QueryMultiTXYs: Synthesizing list of tile x,y @ autoselected z=%d", destZ);
-            console.log("LBITS.QueryMultiTXYs: - Searching %d indices for master...", this.bitstores.length);
+            console.log("LBITS.QueryMultiTXYs: [%d] Synthesizing list of tile x,y @ autoselected z=%d", this.layerId, destZ);
+            console.log("LBITS.QueryMultiTXYs: [%d] - Searching %d indices for master...", this.layerId, this.bitstores.length);
         }//if
         
         return destZ;
@@ -1069,18 +1143,18 @@ var LBITS = (function()
             var xys = bs.DecomposeIndexIntoXY();
             xs = xys[0]; 
             ys = xys[1];
-            if (this._log) console.log("LBITS.QueryMultiTXYs: -- Master (%d, %d) @ %d decomposed into %d elements.", ox, oy, this.minZ, xys != null && xys[0] != null ? xys[0].length : -1);
+            if (this._log) console.log("LBITS.QueryMultiTXYs: [%d] -- Master (%d, %d) @ %d decomposed into %d elements.", this.layerId, ox, oy, this.minZ, xys != null && xys[0] != null ? xys[0].length : -1);
         }//if
         
         return bs != null ? [xs, ys, ox, oy] : null;
     };
 
 //- (size_t)
-    LBITS.prototype.QueryMultiTXYs_DistinctTXYsforPXYs = function(originpx,originpy,pxs,pys,txs,tys,destZ)
+    LBITS.prototype.QueryMultiTXYs_DistinctTXYsforPXYs = function(originpx, originpy, pxs, pys, txs, tys, destZ)
     {
         var i,j,shrn = (((this.minZ+8)|0)-destZ)|0, distinct_n=0;
 
-        if (this._log) console.log("LBITS.SelectDistinctTXYforPXY: pxy@%d is txy@%d.  Need txy @ %d.  So must >>= %d.  Reprojecting...", this.minZ, this.minZ+8, destZ, shrn);
+        if (this._log) console.log("LBITS.SelectDistinctTXYforPXY: [%d] pxy@%d is txy@%d.  Need txy @ %d.  So must >>= %d.  Reprojecting...", this.layerId, this.minZ, this.minZ+8, destZ, shrn);
 
         // translate coordinates
         for (i=0; i<pxs.length; i=(i+1)|0)
@@ -1138,57 +1212,66 @@ var LBITS = (function()
     
     
 //- (const char*)
-    LBITS.prototype.GetStorageKey = function(x,y,z) 
+    LBITS.prototype.GetStorageKey = function(x, y, z) 
     {
         return "bs_iv_vec_" + this.lastModifiedUnix + "_" + this.layerId + "_" + z + "_" + x + "_" + y + "_b16.txt";
     };
-    
-//- (const char*)
-    LBITS.prototype.GetStorageKey_Canvas_CORS = function(x,y,z)
-    {
-        return "bs_tile_" + this.layerId + "_" + z + "_" + x + "_" + y + ".png";
-    };
-    
-
     
 // ******************************************************************************************************
 // LBITS -- Net / IO -- Data Source Get Abstraction Methods
 // ******************************************************************************************************
 
-//- (void)  Load or GET using any data source, then dispatch create BIT
-    LBITS.prototype.GetAsync_Any = function(x,y,z,shouldAutoload)
+//- (void)  Load or GET using any data source, then create BIT
+    LBITS.prototype.GetAsync_Any = function(x, y, z, shouldAutoload)
     {
-        var cache = this.StorageGet(this.GetStorageKey(x,y,z));
+        var cache = null;
         
-        if (cache != null)
+        if (this.net_cache_enable)
         {
-            this.AddBitstoreFromBitmapIndex(cache, x, y, z, shouldAutoload);
-        }//if
-        else if (this.net_src_png_format)
-        {
-            var url = this.GetTileURL(x, y, z);
-
-            if (!this.img_io_canvas_enable)
+            var ck = this.GetStorageKey(x, y, z);
+            cache  = this.net_multithreading ? localStorage.getItem(ck) : this.StorageGet(ck);
+        
+            if (cache != null)
             {
                 if (this.net_multithreading)
                 {
-                    this._worker.postMessage({url:url,userData:[x, y, z, shouldAutoload, this.img_fx_unshadow, this.img_fx_unstroke, this.img_ch_offset, this.img_alpha_threshold]});
+                    this.WorkerDispatchAsync("IV_BITS_E", url, [x, y, z, shouldAutoload, cache]);
                 }//if
                 else
                 {
-                    this.AddAsync_PNG_URL_libpng(this.GetTileURL(x, y, z), x, y, z, shouldAutoload);
+                    this.AddBitstoreFromBitmapIndex(cache, x, y, z, shouldAutoload, true);
+                }//else
+            }//if
+        }//if
+        
+        if (cache == null)
+        {
+            var url = this.GetTileURL(x, y, z);
+            
+            if (this.net_src_png_format)
+            {
+                if (!this.img_io_canvas_enable)
+                {
+                    if (this.net_multithreading)
+                    {
+                        var op = this.net_cache_enable ? "GET_BITS_IV_E" : "GET_BITS";
+                        this.WorkerDispatchAsync(op, url, [x, y, z, shouldAutoload, this.img_fx_unshadow, this.img_fx_unstroke, this.img_ch_offset, this.img_alpha_threshold]);
+                    }//if
+                    else
+                    {
+                        this.AddAsync_PNG_URL_libpng(url, x, y, z, shouldAutoload);
+                    }//else
+                }//if
+                else
+                {
+                    this.AddAsync_PNG_URL_Canvas(url, x, y, z, shouldAutoload);
                 }//else
             }//if
             else
             {
-                this.AddAsync_PNG_URL_Canvas(this.GetTileURL(x, y, z), x, y, z, shouldAutoload);
+                this.AddAsync_Hex_URL_Canvas(url, x, y, z, shouldAutoload);
             }//else
-            
-        }//else if
-        else
-        {
-            this.AddAsync_Hex_URL_Canvas(this.GetTileURL(x, y, z), x, y, z, shouldAutoload);
-        }//else
+        }//if
     };
     
     
@@ -1197,7 +1280,7 @@ var LBITS = (function()
 // LBITS -- Net / IO -- GET -> Add BIT
 // ******************************************************************************************************
 
-//- (void)      HTTP GET a PNG, then dispatch create BIT.  Uses and requires png.js and zlib.js.  Fastest method possible, works with CORS seamelessly.
+//- (void)      HTTP GET a PNG, then create BIT.  Uses and requires png.js and zlib.js.  Fastest method possible, works with CORS seamelessly.
     LBITS.prototype.AddAsync_PNG_URL_libpng = function(url, x, y, z, shouldAutoload)
     {
         var cubbyLlama = function(response, userData)
@@ -1209,7 +1292,7 @@ var LBITS = (function()
     };
 
 
-//- (void)      HTTP GET a PNG, then dispatch load from store, then dispatch create BIT.  Uses HTML 5 Canvas + CORS.  Slowest method possible.
+//- (void)      HTTP GET a PNG, render to Canvas and extract bytes, then dispatch create BIT.  Uses HTML 5 Canvas + CORS.  Slowest method possible.
     LBITS.prototype.AddAsync_PNG_URL_Canvas = function(url, x, y, z, shouldAutoload)
     {
         var getCallback = function(response, userData)
@@ -1227,7 +1310,7 @@ var LBITS = (function()
 
 
 //- (void)      Probably will never be used, not much reason to load this from anything but local cache.
-    LBITS.prototype.AddAsync_Hex_URL_Canvas = function(url,x,y,z,shouldAutoload)
+    LBITS.prototype.AddAsync_Hex_URL_Canvas = function(url, x, y, z, shouldAutoload)
     {
         var cubbyLlama = function(response, userData)
         {
@@ -1271,7 +1354,7 @@ var LBITS = (function()
 // ******************************************************************************************************
 
 //- (const char*)       Unfortunately, cannot get both headers + binary data :(
-    LBITS.prototype.GetLastModifiedHeaderAsync = function(url,x,y,z,dateStringCallback)
+    LBITS.prototype.GetLastModifiedHeaderAsync = function(url, x, y, z, dateStringCallback)
     {
         var cubbyLlama = function(response, userData)
         {
@@ -1282,15 +1365,20 @@ var LBITS = (function()
                 if (d != null)
                 {
                     this.lastModifiedUnix = Math.round(d.getTime() / 86400000.0);
-                    this.lastModified     = d.toISOString().substring(0,10);
-                    if (this._log) console.log("LBITS.GetLastModifiedHeaderAsync: Last-Modified: %s", this.lastModified);
+                    this.lastModified     = d.toISOString().substring(0, 10);
+                    if (this._log) console.log("LBITS.GetLastModifiedHeaderAsync: [%d] Last-Modified: %s", this.layerId, this.lastModified);
                     
                     if (dateStringCallback != null)
                     {
                         dateStringCallback(this.lastModified);
                     }//if
+                    
+                    if (this.net_cache_enable)
+                    {
+                        this.PurgeOldCacheForLayer();
+                    }//if
                         
-                    this.GetAsync_Any(x,y,z,true);
+                    this.GetAsync_Any(x, y, z, true);
                 }//if
             }//if
         }.bind(this);
@@ -1322,12 +1410,40 @@ var LBITS = (function()
         if (bs != null && this.net_cache_enable)
         {
             var ivs = bs.DecomposeIndexIntoIV();
-            if (this._log) console.log("LBITS.AddBitstoreToLocalCache: Setting cache: [%d] (%d, %d) @ %d.... %d len and %d len", this.layerId, x, y, z, ivs[0].length, ivs[1].length);
-            this.StorageSet(this.GetStorageKey(bs.x,bs.y,bs.z), ivs[0], ivs[1]);  
+            if (this._log) console.log("LBITS.AddBitstoreToLocalCache: [%d] Setting cache: (%d, %d) @ %d.... %d len and %d len", this.layerId, x, y, z, ivs[0].length, ivs[1].length);
+            this.StorageSet(this.GetStorageKey(bs.x, bs.y, bs.z), ivs[0], ivs[1]);  
         }//if
     };
     
-
+//- (void)
+    LBITS.prototype.PurgeOldCacheForLayer = function()
+    {
+        var  n = localStorage.length >>> 0;
+        var ds = "" + this.lastModifiedUnix;
+        var mb = this.GetStorageKey(0, 0, 0).substring(0, 10); // bs_iv_vec_
+        var ls = this.layerId.toString();
+        var le = (18 + ls.length) >>> 0;
+        var key;
+        
+        // bs_iv_vec_12345_2_0_0_0_b16.txt
+        // 0         1         2
+        // 0123456789012345678901234567890
+        
+        for (var i=0; i<n; i++)
+        {
+            key = localStorage.key(i);
+            
+            if (   key.length > 20
+                && key.substring( 0, 10) == mb
+                && key.substring(16, le) == ls
+                && key.substring(10, 15) != ds)
+            {
+                if (this._log) console.log("LBITS.PurgeOldCacheForLayer: [%d] Purging %d bytes: (%s)", this.layerId, localStorage[key].length<<1, key);
+                
+                localStorage.removeItem(key);
+            }//if
+        }//for
+    };
     
 // ******************************************************************************************************
 // LBITS -- Class (Static) Methods -- Misc
@@ -1397,11 +1513,8 @@ var LBITS = (function()
         }//if
         else
         {
-            var isub_str = src_i_str.substring(                   0, src_i_str.length>>>1);
-            var vsub_str = src_i_str.substring(src_i_str.length>>>1, src_i_str.length);
-            
-            i_u16 = LBITS.new_vhtoi_u16(isub_str);
-            v_u16 = LBITS.new_vhtoi_u16(vsub_str);
+            i_u16 = LBITS.new_vhtoi_u16(src_i_str.substring(0, src_i_str.length>>>1));
+            v_u16 = LBITS.new_vhtoi_u16(src_i_str.substring(src_i_str.length>>>1, src_i_str.length));
         }//else
         
         return LBITS.new_ivtovec_u16(i_u16, v_u16, 4096);
@@ -1411,33 +1524,29 @@ var LBITS = (function()
     LBITS.new_ivtovec_u16 = function(srci_u16, srcv_u16, n)
     {
         var dest_u16 = new Uint16Array(n);
-        LBITS.ivtovec_u16(srci_u16, srcv_u16, dest_u16);
+        LBITS.ivtovec_u16(dest_u16, srci_u16, srcv_u16);
         return dest_u16;
     };
     
 //- (void)      // sets elements in dest based upon indices into dest in srci and corresponding values in srcv
-    LBITS.ivtovec_u16 = function(srci_u16, srcv_u16, dest_u16)
+    LBITS.ivtovec_u16 = function(dest_u16, srci_u16, srcv_u16)
     {
-        if (srci_u16.length % 4 == 0)
+        var i;
+        var src_n = srci_u16.length >>> 0;
+        var max_i = src_n - (src_n % 4);
+    
+        for (i = 0; i < max_i; i += 4)
         {
-            var i = 0, max_i = srci_u16.length;
+            dest_u16[srci_u16[i  ]] = srcv_u16[i  ];
+            dest_u16[srci_u16[i+1]] = srcv_u16[i+1];
+            dest_u16[srci_u16[i+2]] = srcv_u16[i+2];
+            dest_u16[srci_u16[i+3]] = srcv_u16[i+3];
+        }//for
         
-            while (i < max_i) // loop unroll
-            {
-                dest_u16[srci_u16[i  ]] = srcv_u16[i  ];
-                dest_u16[srci_u16[i+1]] = srcv_u16[i+1];
-                dest_u16[srci_u16[i+2]] = srcv_u16[i+2];
-                dest_u16[srci_u16[i+3]] = srcv_u16[i+3];
-                i += 4;
-            }//while
-        }//if
-        else
+        for (i = max_i; i < src_n % 4; i++)
         {
-            for (var i=0; i<srci_u16.length; i++)
-            {
-                dest_u16[srci_u16[i]] = srcv_u16[i];
-            }//for
-        }//else
+            dest_u16[srci_u16[i]] = srcv_u16[i];
+        }//for
     };
     
 
@@ -1446,33 +1555,29 @@ var LBITS = (function()
     LBITS.new_vhtoi_u16 = function(src_str)
     {
         var dest_u16 = new Uint16Array(src_str.length >>> 2);
-        LBITS.vhtoi_u16(src_str, dest_u16);
+        LBITS.vhtoi_u16(dest_u16, src_str);
         return dest_u16;
     };
     
 //- (void)      // sets values in uint16_t* buffer dest_u16 converted from string src_str of 4-char base-16 hex values
-    LBITS.vhtoi_u16 = function(src_str, dest_u16)
+    LBITS.vhtoi_u16 = function(dest_u16, src_str)
     {
-        if (dest_u16.length % 4 == 0)
+        var i;
+        var dest_n = dest_u16.length >>> 0;
+        var max_i  = dest_n - (dest_n % 4);
+    
+        for (i = 0; i < max_i; i += 4)
         {
-            var i = 0, max_i = src_str.length;
+            dest_u16[i  ] = parseInt(("0x" + src_str.substring( i    << 2, ( i    << 2)+4))); 
+            dest_u16[i+1] = parseInt(("0x" + src_str.substring((i+1) << 2, ((i+1) << 2)+4))); 
+            dest_u16[i+2] = parseInt(("0x" + src_str.substring((i+2) << 2, ((i+2) << 2)+4))); 
+            dest_u16[i+3] = parseInt(("0x" + src_str.substring((i+3) << 2, ((i+3) << 2)+4)));
+        }//for
         
-            while (i < max_i) // loop unroll
-            {
-                dest_u16[i  ] = parseInt(('0x' + src_str.substring( i    << 2, ( i    << 2)+4))); 
-                dest_u16[i+1] = parseInt(('0x' + src_str.substring((i+1) << 2, ((i+1) << 2)+4))); 
-                dest_u16[i+2] = parseInt(('0x' + src_str.substring((i+2) << 2, ((i+2) << 2)+4))); 
-                dest_u16[i+3] = parseInt(('0x' + src_str.substring((i+3) << 2, ((i+3) << 2)+4)));
-                i += 4;
-            }//while
-        }//if
-        else
+        for (i = max_i; i < dest_n % 4; i++)
         {
-            for (var i=0; i<dest_u16.length; i++)
-            {
-                dest_u16[i] = parseInt(('0x' + src_str.substring(i << 2, (i << 2) + 4)));
-            }//for
-        }//else
+            dest_u16[i] = parseInt(('0x' + src_str.substring(i << 2, (i << 2) + 4)));
+        }//for
     };
     
 
@@ -1604,8 +1709,10 @@ var BITS = (function()
     {
         if (extent_u32 == null) extent_u32 = BITS.c_GetNewPxExtentVector_u32(x, y, z, this._defExZ);
 
-        return extent_u32[0] >= this.extent[0] && extent_u32[0] < this.extent[2] && extent_u32[2] >= this.extent[0] && extent_u32[2] < this.extent[2]
-            && extent_u32[1] >= this.extent[1] && extent_u32[1] < this.extent[3] && extent_u32[3] >= this.extent[1] && extent_u32[3] < this.extent[3];
+        return extent_u32[0] >= this.extent[0] && extent_u32[0] < this.extent[2] 
+            && extent_u32[2] >= this.extent[0] && extent_u32[2] < this.extent[2]
+            && extent_u32[1] >= this.extent[1] && extent_u32[1] < this.extent[3] 
+            && extent_u32[3] >= this.extent[1] && extent_u32[3] < this.extent[3];
     };
     
     
@@ -1667,24 +1774,7 @@ var BITS = (function()
 //- (size_t)    http://en.wikipedia.org/wiki/Hamming_weight
     BITS.prototype.GetDataCount = function()
     {
-        var i,x,y,y_width,dc = 0;
-        
-        for (y=0; y<64; y=(y+1))
-        {
-            y_width = (y << 6)|0;
-            
-            for (x=0; x<64; x=(x+1)|0)
-            {
-                i = this.data[(y_width+x)|0];
-                
-                for (i = i | 0; i > 0; i = i >>> 1) 
-                {
-                    if (i & 1) dc++;
-                }//for
-            }//for
-        }//for
-        
-        return dc;
+        return BITS.c_GetDataCount(this.data);
     };
     
     
@@ -1758,61 +1848,14 @@ var BITS = (function()
 //- (uint8_t*)  Returns a 256x256 Planar8 representation of the bitmap, with 1=data_u08 and 0=NODATA_u08
     BITS.prototype.GetNewPlanar8FromBitmap = function(data_u08, NODATA_u08)
     {
-        var x,y,y_256,dest_u08 = new Uint8Array(65536);
-        
-        if (NODATA_u08 != 0) 
-        { 
-            for (var i=0; i<dest_u08.length; i++) 
-            { 
-                dest_u08[i] = NODATA_u08; // "memset"
-            }//for 
-        }//if
-        
-        for (y=0; y<256; y++)
-        {
-            y_256 = y << 8;
-            
-            for (x=0; x<256; x+=8) // loop unroll
-            {
-                if (this.GetBit(x,   y)) dest_u08[(y_256)+x  ] = data_u08;
-                if (this.GetBit(x+1, y)) dest_u08[(y_256)+x+1] = data_u08;
-                if (this.GetBit(x+2, y)) dest_u08[(y_256)+x+2] = data_u08;
-                if (this.GetBit(x+3, y)) dest_u08[(y_256)+x+3] = data_u08;
-                if (this.GetBit(x+4, y)) dest_u08[(y_256)+x+4] = data_u08;
-                if (this.GetBit(x+5, y)) dest_u08[(y_256)+x+5] = data_u08;
-                if (this.GetBit(x+6, y)) dest_u08[(y_256)+x+6] = data_u08;
-                if (this.GetBit(x+7, y)) dest_u08[(y_256)+x+7] = data_u08;
-            }//for
-        }//for
-    
-        return dest_u08;
+        return BITS.c_GetNewPlanar8FromBitmap(this.data, data_u08, NODATA_u08);
     };
     
     
 //- (NSMutableArray*)   Returns two vectors of corresponding x and y pixel locations in a 256x256 tile for bits set to on.  x range: [0 ... 255], y range: [0 ... 255]
     BITS.prototype.DecomposeIndexIntoXY = function()
     {
-        var dc         = this.GetDataCount();
-        var dest_x_u32 = new Uint32Array(dc);
-        var dest_y_u32 = new Uint32Array(dc);
-        var x,bitIdx,dest_i = 0;
-        
-        for (var y=0; y<256; y=(y+1)|0)
-        {
-            for (x=0; x<256; x=(x+1)|0)
-            {
-                bitIdx = (((((y>>>2)|0)<<6)|0)+((x>>>2)|0))|0;
-            
-                if (this.GetBitReusingIdx(bitIdx, x, y))
-                {
-                    dest_x_u32[dest_i] = x;
-                    dest_y_u32[dest_i] = y;
-                    dest_i             = (dest_i+1)|0;
-                }//if
-            }//for
-        }//for
-        
-        return [dest_x_u32, dest_y_u32];
+        return BITS.c_DecomposeIndexIntoXY(this.data);
     };
     
 
@@ -1828,40 +1871,7 @@ var BITS = (function()
 //- (int32_t*)  Returns the extent of the pixels, rather than the general tile boundaries.  Do *not* set a BIT's extent to this.
     BITS.prototype.GetPixelExtentFromBitstore = function()
     {
-        var x,y,y_256,dc=0,minX=32767,minY=32767,maxX=-32768,maxY=-32768;
-
-        if (this.data != null) // not worth lazy loading
-        {
-            for (y=0; y<256; y=(y+1)|0)
-            {
-                y_256 = (y << 8)|0;
-            
-                for (x=0; x<256; x=(x+1)|0)
-                {
-                    if ( this.GetBit(x, y) )
-                    {
-                        if (y > maxY) maxY = y;
-                        if (y < minY) minY = y;
-                        if (x > maxX) maxX = x;
-                        if (x < minX) minX = x;
-                    }//if
-                }//for
-            }//for
-        }//if
-
-        if (minX == 32767 && minY == 32767 && maxX == -32768 && maxY == -32768) { minX = 0; minY = 0; maxX = 256; maxY = 256; }//if
-
-        var results = new Uint32Array(8);
-        results[0] = minX;
-        results[1] = minY;
-        results[2] = maxX;
-        results[3] = maxY;
-        results[4] = this.z;
-        results[5] = this.z;
-        results[6] = this.x;
-        results[7] = this.y;
-
-        return results;
+        return BITS.c_GetPixelExtentFromBitstore(this.data);
     };
     
     
@@ -1887,6 +1897,115 @@ var BITS = (function()
     // ****************************************      CLASS (STATIC) FUNCTIONS      **********************************
     // **************************************************************************************************************
 
+//+ (bool)  returns a boolean value indicating whether the pixel is on or off, for pixel x,y coordinates in a 256,256 tile
+    BITS.c_GetBit = function(src_u16, x, y)
+    {
+        return (src_u16[(((((y>>>2)|0)<<6)|0)+((x>>>2)|0))|0] & (((1<<((((((y-((((y>>>2)|0)<<2)|0))|0)<<2)|0)+((x-((((x>>>2)|0)<<2)|0))|0))|0))|0)|0))|0 != 0;
+    };
+    
+//+ (bool)  same as above, but reuses a precalculated index to reduce ops
+    BITS.c_GetBitReusingIdx = function(src_u16, idx, x, y)
+    {
+        return (src_u16[idx] & (((1<<((((((y-((((y>>>2)|0)<<2)|0))|0)<<2)|0)+((x-((((x>>>2)|0)<<2)|0))|0))|0))|0)|0))|0 != 0;
+    };
+
+
+//+ (size_t)    http://en.wikipedia.org/wiki/Hamming_weight
+    BITS.c_GetDataCount = function(src_u16)
+    {
+        var i,x,y,y_width,dc = 0;
+        
+        for (y=0; y<64; y=(y+1))
+        {
+            y_width = (y << 6)|0;
+            
+            for (x=0; x<64; x=(x+1)|0)
+            {
+                i = src_u16[(y_width+x)|0];
+                
+                for (i = i | 0; i > 0; i = i >>> 1) 
+                {
+                    if (i & 1) dc++;
+                }//for
+            }//for
+        }//for
+        
+        return dc;
+    };
+
+//+ (NSMutableArray*)   Returns two vectors of corresponding x and y pixel locations in a 256x256 tile for bits set to on.  x range: [0 ... 255], y range: [0 ... 255]
+    BITS.c_DecomposeIndexIntoXY = function(src_u16)
+    {
+        var dc         = BITS.c_GetDataCount(src_u16);
+        var dest_x_u32 = new Uint32Array(dc);
+        var dest_y_u32 = new Uint32Array(dc);
+        var x,bitIdx,dest_i = 0;
+        
+        for (var y=0; y<256; y=(y+1)|0)
+        {
+            for (x=0; x<256; x=(x+1)|0)
+            {
+                bitIdx = (((((y>>>2)|0)<<6)|0)+((x>>>2)|0))|0;
+            
+                if ((src_u16[bitIdx] & (((1<<((((((y-((((y>>>2)|0)<<2)|0))|0)<<2)|0)+((x-((((x>>>2)|0)<<2)|0))|0))|0))|0)|0))|0 != 0) // inlined GetBit
+                {
+                    dest_x_u32[dest_i] = x;
+                    dest_y_u32[dest_i] = y;
+                    dest_i             = (dest_i+1)|0;
+                }//if
+            }//for
+        }//for
+        
+        return [dest_x_u32, dest_y_u32];
+    };
+
+
+    BITS.c_GetPixelExtentFromBitstore = function(src_u16, x, y, z)
+    {
+        var x,y,y_256,dc=0,minX=32767,minY=32767,maxX=-32768,maxY=-32768,bitIdx;
+
+        if (this.data != null) // not worth lazy loading
+        {
+            for (y=0; y<256; y=(y+1)|0)
+            {
+                y_256 = (y << 8)|0;
+            
+                for (x=0; x<256; x=(x+1)|0)
+                {
+                    bitIdx = (((((y>>>2)|0)<<6)|0)+((x>>>2)|0))|0;
+                
+                    if ((src_u16[bitIdx] & (((1<<((((((y-((((y>>>2)|0)<<2)|0))|0)<<2)|0)+((x-((((x>>>2)|0)<<2)|0))|0))|0))|0)|0))|0 != 0) // inlined GetBit
+                    {
+                        if (y > maxY) maxY = y;
+                        if (y < minY) minY = y;
+                        if (x > maxX) maxX = x;
+                        if (x < minX) minX = x;
+                    }//if
+                }//for
+            }//for
+        }//if
+
+        if (minX == 32767 && minY == 32767 && maxX == -32768 && maxY == -32768) 
+        { 
+            minX = 0; 
+            minY = 0; 
+            maxX = 256; 
+            maxY = 256; 
+        }//if
+
+        var results = new Uint32Array(8);
+        results[0] = minX;
+        results[1] = minY;
+        results[2] = maxX;
+        results[3] = maxY;
+        results[4] = z;
+        results[5] = z;
+        results[6] = x;
+        results[7] = y;
+
+        return results;
+    };
+
 
     BITS.c_DecomposeIndexIntoIV = function(src_u16)
     {
@@ -1897,16 +2016,56 @@ var BITS = (function()
     
         var dest_i_str = "", dest_v_str = "";
         
-        for (var i=0; i<4096; i++)
+        for (var i=0; i<4096; i=(i+1)|0)
         {
             if (src_u16[i] != 0) // inlined
             {
-                dest_i_str +=         i  < 16 ? "000" +          i.toString(16) :         i  < 256 ? "00" +          i.toString(16) :         i  < 4096 ? "0" +          i.toString(16) :          i.toString(16);
-                dest_v_str += src_u16[i] < 16 ? "000" + src_u16[i].toString(16) : src_u16[i] < 256 ? "00" + src_u16[i].toString(16) : src_u16[i] < 4096 ? "0" + src_u16[i].toString(16) : src_u16[i].toString(16);
+                dest_i_str += i < 0x0010 ? "000" + i.toString(16) 
+                            : i < 0x0100 ?  "00" + i.toString(16) 
+                            : i < 0x1000 ?   "0" + i.toString(16) 
+                            :                      i.toString(16);
+                            
+                dest_v_str += src_u16[i] < 0x0010 ? "000" + src_u16[i].toString(16) 
+                            : src_u16[i] < 0x0100 ?  "00" + src_u16[i].toString(16) 
+                            : src_u16[i] < 0x1000 ?   "0" + src_u16[i].toString(16) 
+                            :                               src_u16[i].toString(16);
             }//if
         }//for
         
         return [dest_i_str, dest_v_str];  
+    };
+    
+    
+    BITS.c_GetNewPlanar8FromBitmap = function(src_u16, data_u08, NODATA_u08)
+    {
+        var x,y,y_256,dest_u08 = new Uint8Array(65536);
+        
+        if (NODATA_u08 != 0) 
+        { 
+            for (var i=0; i<dest_u08.length; i++) 
+            { 
+                dest_u08[i] = NODATA_u08; // "memset"
+            }//for 
+        }//if
+        
+        for (y=0; y<256; y++)
+        {
+            y_256 = y << 8;
+            
+            for (x=0; x<256; x+=8) // loop unroll
+            {
+                if (BITS.c_GetBit(src_u16, x,   y)) dest_u08[(y_256)+x  ] = data_u08;
+                if (BITS.c_GetBit(src_u16, x+1, y)) dest_u08[(y_256)+x+1] = data_u08;
+                if (BITS.c_GetBit(src_u16, x+2, y)) dest_u08[(y_256)+x+2] = data_u08;
+                if (BITS.c_GetBit(src_u16, x+3, y)) dest_u08[(y_256)+x+3] = data_u08;
+                if (BITS.c_GetBit(src_u16, x+4, y)) dest_u08[(y_256)+x+4] = data_u08;
+                if (BITS.c_GetBit(src_u16, x+5, y)) dest_u08[(y_256)+x+5] = data_u08;
+                if (BITS.c_GetBit(src_u16, x+6, y)) dest_u08[(y_256)+x+6] = data_u08;
+                if (BITS.c_GetBit(src_u16, x+7, y)) dest_u08[(y_256)+x+7] = data_u08;
+            }//for
+        }//for
+    
+        return dest_u08;
     };
 
 
