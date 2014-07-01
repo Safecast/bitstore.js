@@ -13,11 +13,17 @@ Yes, but note for the web worker you still need to specify bitstore.js as well, 
 
 ##LESS WORDS MORE CODE OMG
 
-In your init for LBITs:
+First, in whatever is including bitstore.js already:
 
 ```
-var pngsrc = "http://domain.org/stuff/png_zlib_worker_min.js";
-var bitsrc = "http://domain.org/stuff/bitstore.js";
+importScripts("png_zlib_worker_min.js");
+```
+
+Next, in your init for LBITs:
+
+```
+var pngsrc = "http://domain.org/stuff/png_zlib_worker_min.js";  // MUST be absolute path for inlined web worker
+var bitsrc = "http://domain.org/stuff/bitstore.js";             // MUST be absolute path for inlined web worker
 
 var opts   = new LBITSOptions({ multi:1, url0:pngsrc, url1:bitsrc });
 ```
