@@ -237,14 +237,11 @@ Multithreading is not compatible with HTML 5 Canvas.  HTML 5 Canvas will only ru
 
 Multithreading will not work if full lazy load mode is enabled; the overhead of serializing copies is too high.
 
-Multithreading support requires three include files which can be specified in the LBITSOptions object.
+Multithreading support requires three include files which can be specified in the LBITSOptions object.  (bitstore.js, zlib.js, modified png.js)
 
 When specifying the URL for these, note it must be absolute for an inlined worker.
 
 Using a minified or combined version is fine; however, the correct URL must be specified.
-
-  - 1. bitstores.js (this)
-  - 2. png_zlib_worker_min.js
 
 
 ##Optional Configuration - Image Processing
@@ -310,26 +307,3 @@ However, this can also fail.  What if the original area had been different?  (as
 Unfortunately, it cannot recover cells that were originally adjacent to other data cells both right and down.  And they cannot be discriminated by value or alpha.
 
 A possibility that remains is getting the z+1 tiles instead, and downsampling them by 2x.
-
-##LBITS -- Layer Bitstore
-The Layer Bitstore (LBITS) "class" is a convienience wrapper that automates indexing a layer.
-
-This is really the only componenet you should need to use. (other than maybe the options container)
-
-As mentioned above, once set up with a couple numbers and a URL, it is fully automated, self-updating, and client-side.
-It only needs to know a few things:
-
-  - 1. The min and max zoom levels of your layer
-  - 2. A URL template to use, substituting {z} {x} and {y} for numbers.
-  - 3. The x/y/z for a single RGBA8888 PNG tile that indexes the entire dataset.  This is guaranteed to be the z=0 tile for every dataset.
-  - 4. An arbitrary unique integer "layerId" to link the index to a particular tileset comprising a layer.  This can be any integer value, but should be unique.  If you have very similar layers, you can reuse the layerId from one as a proxy in another.
-
-When passed this information in the LBITS constructor, the code will:
-
-  - 1. Load the PNG (or from cache, if present)
-  - 2. Create an initial "master" global bitmap index from the alpha channel
-  - 3. Calculate the layer's extent
-  - 4. Determine what other indices are needed.
-    - a. Find a single tile to do this, if possible.
-    - b. If not, decompose and reproject the global index into a list of many additional tiles.
-  - 5. Create bitstores for 0 - n additional tiles found in #3
