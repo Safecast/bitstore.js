@@ -3,7 +3,7 @@ Optional Files
 
 ##What's this?
 
-A pre-minified combo of zlib.js and png.js.  png.js has been modded especially to work in a background Web Worker thread.  (the default will not)
+A pre-minified combo of zlib.js and png.js.  png.js has been modded especially to work in a background Web Worker thread.  (the standard png.js release will not)
 
 These files are originally from: http://github.com/devongovett/png.js/
 
