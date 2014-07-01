@@ -132,7 +132,15 @@ Single file solution.  100% pure vanilla standards-compliant JavaScript.
 
 ##Example
 
-1. Instantiate with constructor at startup:
+1. Globals
+===
+
+```
+importScripts("bitstore.js");
+var MY_FIRST_BARBIE_GLOBAL_POINTER = null;
+```
+
+2. Instantiate with constructor at startup:
 ===
 
 It puts the code in the init function or it gets the bucket again.
@@ -154,7 +162,7 @@ var dateCallback = function(dateString)
 MY_FIRST_BARBIE_GLOBAL_POINTER = new LBITS(2, 0, 16, "http://s.org/tiles/{z}/tile_{z}_{x}_{y}.png",  0, 0, opts, dateCallback);
 ```
 
-2. Add "ShouldLoadTile" to Google Maps API tile callback.
+3. Add "ShouldLoadTile" to Google Maps API tile callback.
 ===
 
 ```
