@@ -180,7 +180,7 @@ getTileUrl: function (xy, z)
 
 (note: getNormalizedCoord can be found here: http://developers.google.com/maps/documentation/javascript/maptypes ... this is optional, but if you send extent checks which are out of the bounds of the coordinate system, it will always return false, which is the expected behavior.)
 
-##What's with the "extent_u32" parameter in LBITS.prototype.ShouldLoadTile?  Do I need that?
+##What's with the "extent_u32" parameter in LBITS.ShouldLoadTile?  Do I need that?
 
 No.  It's completely optional and a mechanism for preventing allocations if you're particularly hardcore and like buffer pools.  It will be created automatically internally from the x/y/z parameters.  Just pass null as shown above and all will be well.
 
@@ -223,30 +223,9 @@ Another approach to just test the net effect it has is to embed a global counter
 ##Optional Components
 Optional support for faster processing and multithreading requires libpng and zlib.
 
-  - 1. png.js
-    - Comment: Not necessary, but will use slower HTML5 Canvas fallback if not present.
-    - Comment: Strongly recommended for best results.
+This (png_zlib_worker_min.js) is now included in this repo's "Optional" directory and is all you need.
 
-*OR*
-
-  - 1. png_worker.js
-    - Comment: This is a version of png.js modified to work with background Web Worker threads.
-    - Comment: This allows for both better performance as with the vanilla png.js, and also multithreading.
-  - 2. zlib.js
-    - Comment: Necessary for either png.js.
-    - Comment: No need for any particular version of this.
-
-png.js and zlib.js source:  http://github.com/devongovett/png.js/
-
-eg: in the production version at safecast.org, I have:
-  - 1. png_zlib_worker_min.js -- modded for the multithreading worker
-  - 2. png_zlib_min.js        -- regular vanilla library, used for other things
-  - 3. bitstore_min.js        -- used for the core functionality and the multithreading worker as well
-
-
-##Wait, that's pretty headache inducing.  What if I get that wrong?
-
-Don't worry, the code will automatically fall back to Canvas support and keep working.  You can't get this part completely wrong, you just get a console warning and lose some performance.
+source:  http://github.com/devongovett/png.js/
 
 
 ##Optional Configuration - Multithreading
@@ -265,28 +244,7 @@ When specifying the URL for these, note it must be absolute for an inlined worke
 Using a minified or combined version is fine; however, the correct URL must be specified.
 
   - 1. bitstores.js (this)
-  - 2. png_worker.js
-  - 3. zlib.js
-
-##Modding png.js for the Multithreaded Background Worker
-Replace the original lines with the following:
-
-```
-Line         New Code                      Comment
-----------   -------------------------    ------------------------------------------------------------------------
-- Line 25:   //(function() {              Disable the outer function wrapper, kill the "window" dependancy.
-- Line 26:   //  var PNG;                 Disable the outer function wrapper, kill the "window" dependancy.
-- Line 28:   var PNG = (function() {      Rework the inner function wrapper to be stand-alone.
-- Line 361:  scratchCanvas = null;        Disable all explicit Canvas refs on init, kill the "document" dependancy.
-- Line 362:  scratchCtx = null;           Disable all explicit Canvas refs on init, kill the "document" dependancy.
-- Line 457:  //window.PNG = PNG;          Disable the outer function wrapper, kill the "window" dependancy.
-- Line 459:  //}).call(this);             Disable the outer function wrapper, kill the "window" dependancy.
-```
-
-This will remove the references to document and window, which are verboten in a background web worker.  However, it will also break all the functionality in png.js that uses those features, so it is recommended to keep the original.
-
-
-
+  - 2. png_zlib_worker_min.js
 
 
 ##Optional Configuration - Image Processing
