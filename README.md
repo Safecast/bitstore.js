@@ -17,7 +17,7 @@ Do you have a raster tile layer with holes in it?  Or is it clipped to a shoreli
 Then yes, it probably can.
  
 ##Is there a demo?
-Yes, as of 2014-06-24.  See http://safecast.org/tilemap
+Yes, as of 2014-07-01.  See http://safecast.org/tilemap
 
 In particular, right click on the map and select "Bitmap Index Visualization" or "Show All Bitmap Indices", which renders all the bitmap indices created by this library for a production application. (via the futuristic wonders of client-side uncompressed GIF89A)
 
@@ -105,7 +105,7 @@ Script Dependencies:
   - 1. png.js / zlib.js -- entirely optional, but recommended.  Significantly improves performance over HTML5 Canvas.
 
 
-(png.js / zlib.js source: http://github.com/devongovett/png.js/ )
+(png.js / zlib.js source: http://github.com/devongovett/png.js/ ... now included in the "Optional" directory in this repo.)
 
 
 ##Stuff it will probably work on:
@@ -261,7 +261,7 @@ Two optional processing modes are available to help recover alpha channel data. 
     - this only works with an asymmetric 2x2 fill, and only one that is forward only.
     - success rate: ~80%
 
-##Stroke Recovery
+##Optional Configuration - Image Processing - Stroke Recovery
 (not that kind)
 
 The particulars of the three-pass algorithm are depicted below to help provide understanding if it will be compatible with your dataset or not.
