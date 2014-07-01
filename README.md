@@ -61,7 +61,7 @@ It quickly became problematic to attempt to include new datasets, or deal with c
 
 This library was created as a solution to all of that.
 
-bitstores.js provides the same performance benefits, but has been reworked to be much more versatile so it should work with most tilesets.  It is also adaptive should they change, without the need for manual intervention.
+bitstore.js provides the same performance benefits, but has been reworked to be much more versatile so it should work with most tilesets.  It is also adaptive should they change, without the need for manual intervention.
 
 #Is there anything else like it?
 Yes, but not for the web.  Raster GIS data has been getting indexed in some form since the 1970s, so there's plenty.  In terms of web maps though, there is nothing else I am aware of.
@@ -139,40 +139,49 @@ It puts the code in the init function or it gets the bucket again.
 
 ##Basic Configuration:
 
-    MY_FIRST_BARBIE_GLOBAL_POINTER = new LBITS(2, 0, 16, "http://safecast.org/tilemap/tiles/{z}/tile_{z}_{x}_{y}.png", 0, 0, null, null);
-
+```
+MY_FIRST_BARBIE_GLOBAL_POINTER = new LBITS(2, 0, 16, "http://s.org/tiles/{z}/tile_{z}_{x}_{y}.png", 0, 0, null, null);
+```
 
 ##Custom Configuration, with options and date callback:
 
-    var opts = new LBITSOptions({ idx_max_bitmap_z:5 });
-    var dateCallback = function(dateString) 
-    {
-        document.getElementById("0").innerText += " " + dateString;
-    };
-    MY_FIRST_BARBIE_GLOBAL_POINTER = new LBITS(2, 0, 16, "http://safecast.org/tilemap/tiles/{z}/tile_{z}_{x}_{y}.png",  0, 0, opts, dateCallback);
-
+```
+var opts = new LBITSOptions({ idx_max_bitmap_z:5 });
+var dateCallback = function(dateString) 
+{
+    document.getElementById("0").innerText += " " + dateString;
+};
+MY_FIRST_BARBIE_GLOBAL_POINTER = new LBITS(2, 0, 16, "http://s.org/tiles/{z}/tile_{z}_{x}_{y}.png",  0, 0, opts, dateCallback);
+```
 
 2. Add "ShouldLoadTile" to Google Maps API tile callback.
 ===
 
-
-     getTileUrl: function (xy, z)
-                 {
-                    var nXY = getNormalizedCoord(xy, z);
-                    if (    !nXY
-                        || (!MY_FIRST_BARBIE_GLOBAL_POINTER.ShouldLoadTile(2, nXY.x, nXY.y, z)))
-                    {
-                        return null;
-                    }//if
-                    return "http://safecast.org/tilemap/tiles/" + z + "/tile_" + z + "_" + nXY.x + "_" + nXY.y+ ".png"
-                  }
-
+```
+getTileUrl: function (xy, z)
+            {
+                var nXY = getNormalizedCoord(xy, z);
+                if (    !nXY
+                    || (!MY_FIRST_BARBIE_GLOBAL_POINTER.ShouldLoadTile(2, nXY.x, nXY.y, z, null)))
+                {
+                    return null;
+                }//if
+                return "http://s.org/tiles/" + z + "/tile_" + z + "_" + nXY.x + "_" + nXY.y+ ".png"
+            }
+```
 
 (note: getNormalizedCoord can be found here: http://developers.google.com/maps/documentation/javascript/maptypes ... this is optional, but if you send extent checks which are out of the bounds of the coordinate system, it will always return false, which is the expected behavior.)
 
+##What's with the "extent_u32" parameter in LBITS.prototype.ShouldLoadTile?  Do I need that?
+
+No.  It's completely optional and a mechanism for preventing allocations if you're particularly hardcore and like buffer pools.  It will be created automatically internally from the x/y/z parameters.  Just pass null as shown above and all will be well.
+
+##What's the layerId parameter?
+
+An arbitrary integer that uniquely identifies that layer / tileset.  ("2" in the above example)  Set it as you like.
 
 ##Maintenance Requirements
-One of the design goals for bitstores.js was to reduce maintenance requirements; hence the last-modified date callback, and the auto-updated extent, etc.  It is less metadata to manually maintain.  This even works in a dumb server environment.
+One of the design goals for bitstore.js was to reduce maintenance requirements; hence the last-modified date callback, and the auto-updated extent, etc.  It is less metadata to manually maintain.  This even works in a dumb server environment.
 
 Nonetheless, the min/max Z and master tile x/y must all be updated if the dataset significantly changes.
 It is recommended the master tile be set to the zoom level 0 tile to be future-proof for updatable datasets whose extents may change.
@@ -193,8 +202,10 @@ A less subjective way is probably taking a heap snapshot in a web browser's dev 
 
 But, if you wanted a more visual reprsentation, there is a function included for that:
 
-                    BITS.prototype.GetNewPlanar8FromBitmap = function(data_u08, NODATA_u08)
-                    
+```
+BITS.prototype.GetNewPlanar8FromBitmap = function(data_u08, NODATA_u08)
+```
+                 
 This returns a new UInt8Array with 64k elements (a 256x256 image), which can be converted into an image via HTML5 Canvas's putImageData or similar (lib_bmp.js, etc).
 
 Another approach to just test the net effect it has is to embed a global counter variable in getTileUrl and track how many loads it prevented.  Or, instead of returning null upon false from getTileUrl, one could return a URL to an obviously static 256x256 image (eg http://safecast.org/tilemap/dogetile2.png ).
@@ -217,15 +228,21 @@ Optional support for faster processing and multithreading requires libpng and zl
     - Comment: Necessary for either png.js.
     - Comment: No need for any particular version of this.
 
-png.js and zlib.js source:  http:github.com/devongovett/png.js/
+png.js and zlib.js source:  http://github.com/devongovett/png.js/
 
 eg: in the production version at safecast.org, I have:
   - 1. png_zlib_worker_min.js -- modded for the multithreading worker
   - 2. png_zlib_min.js        -- regular vanilla library, used for other things
   - 3. bitstore_min.js        -- used for the core functionality and the multithreading worker as well
 
+
+##Wait, that's pretty headache inducing.  What if I get that wrong?
+
+Don't worry, the code will automatically fall back to Canvas support and keep working.  You can't get this part completely wrong, you just get a console warning and lose some performance.
+
+
 ##Optional Configuration - Multithreading
-Multithreading support is optional, and available via an inlined Web Worker.  As with all web workers, overall throughput is reduced in exchange for less main thread / UI blocking.
+Multithreading support is optional, and available via an inlined Web Worker.
 
 Multithreading may not clearly be worth the headache of configuring it in all cases; you do not need to use it.
 
@@ -246,15 +263,17 @@ Using a minified or combined version is fine; however, the correct URL must be s
 ##Modding png.js for the Multithreaded Background Worker
 Replace the original lines with the following:
 
-     Line         New Code                      Comment
-    ------------ --------------------------    ------------------------------------------------------------------------
-     - Line 25:   //(function() {              Disable the outer function wrapper, kill the "window" dependancy.
-     - Line 26:   //  var PNG;                 Disable the outer function wrapper, kill the "window" dependancy.
-     - Line 28:   var PNG = (function() {      Rework the inner function wrapper to be stand-alone.
-     - Line 361:  scratchCanvas = null;        Disable all explicit Canvas refs on init, kill the "document" dependancy.
-     - Line 362:  scratchCtx = null;           Disable all explicit Canvas refs on init, kill the "document" dependancy.
-     - Line 457:  //window.PNG = PNG;          Disable the outer function wrapper, kill the "window" dependancy.
-     - Line 459:  //}).call(this);             Disable the outer function wrapper, kill the "window" dependancy.
+```
+Line         New Code                      Comment
+----------   -------------------------    ------------------------------------------------------------------------
+- Line 25:   //(function() {              Disable the outer function wrapper, kill the "window" dependancy.
+- Line 26:   //  var PNG;                 Disable the outer function wrapper, kill the "window" dependancy.
+- Line 28:   var PNG = (function() {      Rework the inner function wrapper to be stand-alone.
+- Line 361:  scratchCanvas = null;        Disable all explicit Canvas refs on init, kill the "document" dependancy.
+- Line 362:  scratchCtx = null;           Disable all explicit Canvas refs on init, kill the "document" dependancy.
+- Line 457:  //window.PNG = PNG;          Disable the outer function wrapper, kill the "window" dependancy.
+- Line 459:  //}).call(this);             Disable the outer function wrapper, kill the "window" dependancy.
+```
 
 This will remove the references to document and window, which are verboten in a background web worker.  However, it will also break all the functionality in png.js that uses those features, so it is recommended to keep the original.
 
