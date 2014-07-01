@@ -30,7 +30,7 @@ var opts   = new LBITSOptions({ multi:1, url0:pngsrc, url1:bitsrc });
 
 ##Can there be a bitstore_min.js?
 
-Sure.  Just take the bitstore.js up one directory and paste it into http://jscompress.com or similar.
+Sure.  Just take the bitstore.js from up one directory and paste it into http://jscompress.com or similar.
 
 ##What got modified in png.js?
 
