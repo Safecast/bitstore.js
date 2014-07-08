@@ -97,15 +97,17 @@ This library was written by Nick Dolezal on behalf of safecast.org and the Momok
 
 ##Requirements
 Data:
-  - 1. 256x256 Web Mercator PNG tiles with alpha channel that correlates with tiles intentionally not present
+  - 1. 256x256 Web Mercator PNG tiles with alpha channel that correlates with tiles intentionally not present*
   - 2. Google Maps tile X/Y/Z convention.
   - 3. A single tile that shows the entire dataset at once.  (guaranteed to be the zoom level 0 tile)
 
 Script Dependencies:
-  - 1. png.js / zlib.js -- entirely optional, but recommended.  Significantly improves performance over HTML5 Canvas.
+  - 1. png.js / zlib.js** -- entirely optional, but recommended.  Significantly improves performance over HTML5 Canvas.
 
 
-(png.js / zlib.js source: http://github.com/devongovett/png.js/ ... now included in the "Optional" directory in this repo.)
+(* this has been verified to work with indexed color PNGs, not just RGBA, and is also assumed to work with the single transparent color RGB mode.  It will technically work on RGB PNGs, but it may not be possible to build a mask from RGB data based purely on the channel-threshold model.)
+
+(** png.js / zlib.js source: http://github.com/devongovett/png.js/ ... now included in the "Optional" directory in this repo.)
 
 
 ##Stuff it will probably work on:
@@ -116,7 +118,7 @@ Script Dependencies:
  - a basemap spanning the entire globe
  - JPEGs or PNGs without an alpha channel*
 
-(*It is likely that HTML5 Canvas mode can be used for JPEGs, RGBX PNGs, etc as Canvas always returns RGBA8888 data.  However, this is untested.)
+(*It is likely that HTML5 Canvas mode can be used for JPEGs, GIFs, etc as Canvas always returns RGBA8888 data.  However, this is untested.)
 
 
 
@@ -221,7 +223,7 @@ Another approach to just test the net effect it has is to embed a global counter
 
 
 ##Optional Components
-Optional support for faster processing and multithreading requires libpng and zlib.
+Optional support for faster processing and multithreading requires png.js and zlib.js.
 
 This (png_zlib_worker_min.js) is now included in this repo's "Optional" directory and is all you need.
 
