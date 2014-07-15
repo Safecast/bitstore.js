@@ -102,6 +102,7 @@
 //
 // 
 
+// 2014-07-15 ND: bugfix for remainder chunk handling in hex string serialization/deserialization
 // 2014-06-27 ND: most processing now can happen in web workers.
 //                inlined bit tests, better loop unrolls for non-p2s, fix for max idx z not being enforced.
 //                move try/catch blocks to own functions so they don't block V8 optimizations.
@@ -1543,7 +1544,7 @@ var LBITS = (function()
             dest_u16[srci_u16[i+3]] = srcv_u16[i+3];
         }//for
         
-        for (i = max_i; i < src_n % 4; i++)
+        for (i = max_i; i < max_i + src_n % 4; i++)
         {
             dest_u16[srci_u16[i]] = srcv_u16[i];
         }//for
@@ -1574,7 +1575,7 @@ var LBITS = (function()
             dest_u16[i+3] = parseInt(("0x" + src_str.substring((i+3) << 2, ((i+3) << 2)+4)));
         }//for
         
-        for (i = max_i; i < dest_n % 4; i++)
+        for (i = max_i; i < max_i + dest_n % 4; i++)
         {
             dest_u16[i] = parseInt(('0x' + src_str.substring(i << 2, (i << 2) + 4)));
         }//for
