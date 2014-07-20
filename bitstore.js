@@ -102,6 +102,7 @@
 //
 // 
 
+// 2014-07-20 ND: bugfix for old localStorage cache not getting purged
 // 2014-07-15 ND: bugfix for remainder chunk handling in hex string serialization/deserialization
 // 2014-06-27 ND: most processing now can happen in web workers.
 //                inlined bit tests, better loop unrolls for non-p2s, fix for max idx z not being enforced.
@@ -346,7 +347,24 @@ var LBITS = (function()
             requested_libpng            = !options.img_io_canvas_enable;
             requested_multi             = options.net_multithreading;
         }//if
-                
+        
+        
+        
+        // ***** "private" ivars ******
+        this._log             = false;
+        this._wantedForceLoad = false;
+        this._worker          = null;
+        this._worker_blob     = null;
+        this._worker_blobURL  = null;
+        
+        
+        if (this.net_multithreading)
+        {
+            this.CreateWorker();
+        }//if        
+        
+        
+        // <log_txt>      
         if (requested_multi && !this.net_multithreading && this._log)
         {
             var reason;
@@ -376,18 +394,10 @@ var LBITS = (function()
             console.log("LBITS: [%d] init: Warning: Requested libpng aka png.js not found.  Using HTML5 Canvas fallback with degraded performance.", this.layerId);
         }//if
         
-        this._log             = false;
-        this._wantedForceLoad = false;
-        this._worker          = null;
-        this._worker_blob     = null;
-        this._worker_blobURL  = null;
-        
-        if (this.net_multithreading)
-        {
-            this.CreateWorker();
-        }//if        
-        
         if (this._log) console.log("LBITS: [%d] init: layerId=%d, minZ=%d, maxZ=%d, x=%d, y=%d, urlTemplate=%s.  Getting master...", this.layerId, layerId, minZ, maxZ, x, y, urlTemplate);
+        // </log_txt>
+        
+        
         
         if (this.urlTemplate != null)
         {
@@ -400,7 +410,7 @@ var LBITS = (function()
                 this.GetAsync_Any(x, y, this.minZ, true);
             }//else
         }//if
-    }
+    }//LBITS (constructor)
     
     LBITS.prototype.Has_libpng = function()
     {
@@ -684,7 +694,7 @@ var LBITS = (function()
             if (this.idx_lazyload_detail && !this._didLazyLoad) { this.FinishLazyLoadInit(); }//if // z > this.minZ + 8
         
             shouldLoad = this.minZ <= z && z <= this.maxZ && x >= 0 && y >= 0 && x < (1<<z) && y < (1<<z) && this.IsTileInExtent(x, y, z, extent_u32);
-            
+
             var neededProc = false;
             var bs         = null;
             
@@ -1423,7 +1433,8 @@ var LBITS = (function()
         var ds = "" + this.lastModifiedUnix;
         var mb = this.GetStorageKey(0, 0, 0).substring(0, 10); // bs_iv_vec_
         var ls = this.layerId.toString();
-        var le = (18 + ls.length) >>> 0;
+        var le = (16 + ls.length) >>> 0;
+        var tl = new Array();
         var key;
         
         // bs_iv_vec_12345_2_0_0_0_b16.txt
@@ -1433,7 +1444,7 @@ var LBITS = (function()
         for (var i=0; i<n; i++)
         {
             key = localStorage.key(i);
-            
+
             if (   key.length > 20
                 && key.substring( 0, 10) == mb
                 && key.substring(16, le) == ls
@@ -1441,8 +1452,13 @@ var LBITS = (function()
             {
                 if (this._log) console.log("LBITS.PurgeOldCacheForLayer: [%d] Purging %d bytes: (%s)", this.layerId, localStorage[key].length<<1, key);
                 
-                localStorage.removeItem(key);
+                tl.push(key);
             }//if
+        }//for
+        
+        for (var i=0; i<tl.length; i++)
+        {
+            localStorage.removeItem(tl[i]);
         }//for
     };
     
@@ -1684,8 +1700,8 @@ var BITS = (function()
             {
                 this.FinishLazyLoad();
             }//if
-            
-            shouldLoad = this.DoesTileIntersectData(x, y, z);    
+
+            shouldLoad = this.DoesTileIntersectData(x, y, z);   
         }//if
     
         return shouldLoad;
@@ -1734,7 +1750,7 @@ var BITS = (function()
         for (var bitY = py0; bitY <= py1; bitY=(bitY+1)|0) 
         {
             for (bitX = px0; bitX <= px1; bitX=(bitX+1)|0) 
-            {
+            {            
                 bitIdx = (((((bitY>>>2)|0)<<6)|0)+((bitX>>>2)|0))|0;
             
                 if (    this.data[bitIdx] != 0         // has at least 1px on
