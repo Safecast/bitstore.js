@@ -102,6 +102,7 @@
 //
 // 
 
+// 2014-07-21 ND: bugfix for some edge cases of inlined GetBit and BITS extent check
 // 2014-07-21 ND: new parameter: img_unshd_threshold: sets the RGB channel threshold for considering something "shadow".  default: 1.
 // 2014-07-20 ND: bugfix for old localStorage cache not getting purged
 // 2014-07-15 ND: bugfix for remainder chunk handling in hex string serialization/deserialization
@@ -700,7 +701,13 @@ var LBITS = (function()
         {
             if (this.idx_lazyload_detail && !this._didLazyLoad) { this.FinishLazyLoadInit(); }//if // z > this.minZ + 8
         
-            shouldLoad = this.minZ <= z && z <= this.maxZ && x >= 0 && y >= 0 && x < (1<<z) && y < (1<<z) && this.IsTileInExtent(x, y, z, extent_u32);
+            shouldLoad =    z >= this.minZ
+                         && z <= this.maxZ 
+                         && x >= 0 
+                         && y >= 0 
+                         && x < (1<<z) 
+                         && y < (1<<z) 
+                         && this.IsTileInExtent(x, y, z, extent_u32);
 
             var neededProc = false;
             var bs         = null;
@@ -723,7 +730,7 @@ var LBITS = (function()
                 }//if
                 //</LazyLoad>
             
-                shouldLoad = shouldLoad && bs.ShouldLoadTile(layerId,x,y,z, extent_u32);
+                if (shouldLoad) { shouldLoad = bs.ShouldLoadTile(layerId,x,y,z, extent_u32); }
             
                 //<LazyLoad>
                 if (this.idx_lazyload_detail && !this.idx_lazyload_dim)
@@ -1730,15 +1737,13 @@ var BITS = (function()
 
 
     
-//- (bool)  Extent check -- faster.  Does not check layerId.  Only valid for z >= this.z
+//- (bool)  Extent check -- faster.  Does not check layerId.
     BITS.prototype.CanIndexTile = function(x, y, z, extent_u32)
     {
         if (extent_u32 == null) extent_u32 = BITS.c_GetNewPxExtentVector_u32(x, y, z, this._defExZ);
 
-        return extent_u32[0] >= this.extent[0] && extent_u32[0] < this.extent[2] 
-            && extent_u32[2] >= this.extent[0] && extent_u32[2] < this.extent[2]
-            && extent_u32[1] >= this.extent[1] && extent_u32[1] < this.extent[3] 
-            && extent_u32[3] >= this.extent[1] && extent_u32[3] < this.extent[3];
+        return !(   extent_u32[2] < this.extent[0] || extent_u32[0] >= this.extent[2]
+                 || extent_u32[3] < this.extent[1] || extent_u32[1] >= this.extent[3]);
     };
     
     
@@ -1759,14 +1764,13 @@ var BITS = (function()
         for (var bitY = py0; bitY <= py1; bitY=(bitY+1)|0) 
         {
             for (bitX = px0; bitX <= px1; bitX=(bitX+1)|0) 
-            {            
+            {
                 bitIdx = (((((bitY>>>2)|0)<<6)|0)+((bitX>>>2)|0))|0;
-            
-                if (    this.data[bitIdx] != 0         // has at least 1px on
-                    && (this.data[bitIdx]  = 0xFFFF    // if all bits are on, obviously true
-                    || (this.data[bitIdx]  & (1 << (((bitY-((bitY>>>2)<<2))<<2) + (bitX-((bitX>>>2)<<2))))) != 0)) // inlined
+                                
+                if ((this.data[bitIdx] & (((1<<((((((bitY-((((bitY>>>2)|0)<<2)|0))|0)<<2)|0)+((bitX-((((bitX>>>2)|0)<<2)|0))|0))|0))|0)|0))|0 != 0) // inlined GetBit
                 {
-                    retVal = true; break;
+                    retVal = true;
+                    break;
                 }//if
             }//for
             if (retVal) break;
@@ -1999,7 +2003,7 @@ var BITS = (function()
                 for (x=0; x<256; x=(x+1)|0)
                 {
                     bitIdx = (((((y>>>2)|0)<<6)|0)+((x>>>2)|0))|0;
-                
+                    
                     if ((src_u16[bitIdx] & (((1<<((((((y-((((y>>>2)|0)<<2)|0))|0)<<2)|0)+((x-((((x>>>2)|0)<<2)|0))|0))|0))|0)|0))|0 != 0) // inlined GetBit
                     {
                         if (y > maxY) maxY = y;
