@@ -102,6 +102,7 @@
 //
 // 
 
+// 2014-07-21 ND: new parameter: img_unshd_threshold: sets the RGB channel threshold for considering something "shadow".  default: 1.
 // 2014-07-20 ND: bugfix for old localStorage cache not getting purged
 // 2014-07-15 ND: bugfix for remainder chunk handling in hex string serialization/deserialization
 // 2014-06-27 ND: most processing now can happen in web workers.
@@ -144,6 +145,7 @@ var LBITSOptions = (function()
         this.img_fx_unstroke        = false;
         this.img_ch_offset          = 3;
         this.img_alpha_threshold    = 1;
+        this.img_unshd_threshold    = 1;
         
         // lazy shorthand aliases for the above
         
@@ -165,6 +167,7 @@ var LBITSOptions = (function()
         this.unstr = false;
         this.choff = 3;
         this.alpha = 1;
+        this.shdtr = 1;
         
         for (var n in arguments[0]) { this[n] = arguments[0][n]; }
         
@@ -210,6 +213,7 @@ var LBITSOptions = (function()
         this.img_fx_unstroke       |= this.unstr;
         this.img_ch_offset         |= this.choff;
         this.img_alpha_threshold   |= this.alpha;
+        this.img_unshd_threshold   |= this.shdtr;
     }
     
     LBITSOptions.prototype.i2b = function(x)
@@ -237,14 +241,15 @@ var LBITSOptions = (function()
         ,"idx_lazyload_detail   (bool) [true|false] -- Only load master index tile immediately.  Load rest when needed.  Not recommended."
         ,"idx_lazyload_dim      (bool) [true|false] -- Only load master index tile immediately.  Load rest after first use."
         ,"img_io_canvas_enable  (bool) [true|false] -- Use HTML5 Canvas instead of libpng/zlib.  Slower but don't need another script."
-        ,"img_fx_unshadow       (bool) [true|false] -- PNG, specialized.  Sets the alpha channel value to 0 if the RGB values are" 
-                                                       + " all 0.  Prevents false positives if pure black in the original raster has a"
-                                                       + " non-zero alpha value and does not represent actual data points."
+        ,"img_fx_unshadow       (bool) [true|false] -- PNG, specialized.  Sets the alpha channel value to 0 if the RGB values are all" 
+                                                       + " < img_unshd_threshold.  Prevents false positives if pure black in the original"
+                                                       + " raster has a non-zero alpha value and does not represent actual data points."
         ,"img_fx_unstroke       (bool) [true|false] -- PNG, specialized.  Removes ~90% of the effects of a 2x2 NODATA fill"
                                                        + " / neighboorhood mean function to prevent false positives." 
                                                        + " Slow, 3-pass scalar implementation."
         ,"img_ch_offset          (int)  [0...  3]   -- PNG, specialized.  For using another color channel instead of the alpha channel."
         ,"img_alpha_threshold    (int)  [0...255]   -- PNG, specialized.  Any alpha pixel this value or above will be considered data."
+        ,"img_unshd_threshold    (int)  [0...255]   -- PNG, specialized.  For img_fx_unshadow."
         ];
         return help;
     }
@@ -304,6 +309,7 @@ var LBITS = (function()
         this.img_fx_unstroke         = false;
         this.img_ch_offset           = 3;
         this.img_alpha_threshold     = 1;
+        this.img_unshd_threshold     = 1;
   
         // temp / constructor only
         var has_libpng       =  this.Has_libpng(); 
@@ -343,6 +349,7 @@ var LBITS = (function()
             this.img_fx_unstroke        = options.img_fx_unstroke;
             this.img_ch_offset          = options.img_ch_offset;
             this.img_alpha_threshold    = options.img_alpha_threshold;
+            this.img_unshd_threshold    = options.img_unshd_threshold;
             
             requested_libpng            = !options.img_io_canvas_enable;
             requested_multi             = options.net_multithreading;
@@ -468,7 +475,7 @@ var LBITS = (function()
               +         "var cb = function(response, userData)"
               +         "{"
               +             "var rgba   = LBITS.GetNewRGBA8888_FromPNG_libpng(response);"
-              +             "var bs_u16 = BITS.GetBitmapFromRGBA8888Tile(rgba, userData[4], userData[5], userData[6], userData[7]);"
+              +             "var bs_u16 = BITS.GetBitmapFromRGBA8888Tile(rgba, userData[4], userData[5], userData[6], userData[7], userData[8]);"
               +             "self.postMessage({op:e.data.op, user:userData, ab:bs_u16.buffer}, [bs_u16.buffer]);"
               +         "};"
               +         "LBITS.GetAsync_HTTP(e.data.url, 'arraybuffer', null, cb, e.data.userData); "
@@ -478,7 +485,7 @@ var LBITS = (function()
               +         "var cb = function(response, userData)"
               +         "{"
               +             "var rgba   = LBITS.GetNewRGBA8888_FromPNG_libpng(response);"
-              +             "var bs_u16 = BITS.GetBitmapFromRGBA8888Tile(rgba, userData[4], userData[5], userData[6], userData[7]);"
+              +             "var bs_u16 = BITS.GetBitmapFromRGBA8888Tile(rgba, userData[4], userData[5], userData[6], userData[7], userData[8]);"
               +             "var ivs    = BITS.c_DecomposeIndexIntoIV(bs_u16);"
               +             "self.postMessage({op:e.data.op, ivs0:ivs[0], ivs1:ivs[1], user:userData, ab:bs_u16.buffer}, [bs_u16.buffer]);"
               +         "};"
@@ -489,7 +496,7 @@ var LBITS = (function()
               +         "var cb = function(response, userData)"
               +         "{"
               +             "var rgba   = LBITS.GetNewRGBA8888_FromPNG_libpng(response);"
-              +             "var bs_u16 = BITS.GetBitmapFromRGBA8888Tile(rgba, userData[4], userData[5], userData[6], userData[7]);"
+              +             "var bs_u16 = BITS.GetBitmapFromRGBA8888Tile(rgba, userData[4], userData[5], userData[6], userData[7], userData[8]);"
               +             "var ivs    = BITS.c_DecomposeIndexIntoIV(bs_u16);"
               +             "var ex_u32 = BITS.c_GetPixelExtentFromBitstore(bs_u16, userData[0],userData[1],userData[2]);"
               +             "self.postMessage({op:e.data.op, ivs0:ivs[0], ivs1:ivs[1], user:userData, ab:bs_u16.buffer, ex:ex_u32.buffer}, [bs_u16.buffer, ex_u32.buffer]);"
@@ -793,6 +800,7 @@ var LBITS = (function()
         bs.img_fx_unstroke     = this.img_fx_unstroke;
         bs.img_ch_offset       = this.img_ch_offset;
         bs.img_alpha_threshold = this.img_alpha_threshold;
+        bs.img_unshd_threshold = this.img_unshd_threshold;
     };
 
     
@@ -920,7 +928,7 @@ var LBITS = (function()
         this.bitstores.push(bs);
         bs.isReady = true;        
         
-        bs.SetBitmapFromRGBA8888Tile(rgba, this.img_fx_unshadow, this.img_fx_unstroke, this.img_ch_offset, this.img_alpha_threshold);
+        bs.SetBitmapFromRGBA8888Tile(rgba, this.img_fx_unshadow, this.img_fx_unstroke, this.img_ch_offset, this.img_alpha_threshold, this.img_unshd_threshold);
             
         var px_extent = bs.GetPixelExtentFromBitstore();
         this.UpdateLayerExtentFromBitstorePixelExtent(px_extent);
@@ -1266,7 +1274,7 @@ var LBITS = (function()
                     if (this.net_multithreading)
                     {
                         var op = this.net_cache_enable ? "GET_BITS_IV_E" : "GET_BITS";
-                        this.WorkerDispatchAsync(op, url, [x, y, z, shouldAutoload, this.img_fx_unshadow, this.img_fx_unstroke, this.img_ch_offset, this.img_alpha_threshold]);
+                        this.WorkerDispatchAsync(op, url, [x, y, z, shouldAutoload, this.img_fx_unshadow, this.img_fx_unstroke, this.img_ch_offset, this.img_alpha_threshold, this.img_unshd_threshold]);
                     }//if
                     else
                     {
@@ -1667,6 +1675,7 @@ var BITS = (function()
         this.img_fx_unstroke         = false;   // bool
         this.img_ch_offset           = 3;       // uint32_t
         this.img_alpha_threshold     = 1;       // uint32_t
+        this.img_unshd_threshold     = 1;
         
         this._log                    = false;   // bool
         
@@ -1853,9 +1862,9 @@ var BITS = (function()
 */
 
 //-(void)   Sets/replaces the instance's bitmap index with one newly synthesized from a RGBA8888 tile.
-    BITS.prototype.SetBitmapFromRGBA8888Tile = function(src, unshadow, unstroke, ch_offset, alpha_threshold)
+    BITS.prototype.SetBitmapFromRGBA8888Tile = function(src, unshadow, unstroke, ch_offset, alpha_threshold, unshd_threshold)
     {
-        this.data = BITS.GetBitmapFromRGBA8888Tile(src, unshadow, unstroke, ch_offset, alpha_threshold);
+        this.data = BITS.GetBitmapFromRGBA8888Tile(src, unshadow, unstroke, ch_offset, alpha_threshold, unshd_threshold);
     };
     
 // ******************************************************************************************************
@@ -1904,7 +1913,7 @@ var BITS = (function()
     {
         if (this.tempData != null) 
         {
-            this.SetBitmapFromRGBA8888Tile(this.tempData, this.img_fx_unshadow, this.img_fx_unstroke, this.img_ch_offset, this.img_alpha_threshold);
+            this.SetBitmapFromRGBA8888Tile(this.tempData, this.img_fx_unshadow, this.img_fx_unstroke, this.img_ch_offset, this.img_alpha_threshold, this.img_unshd_threshold);
         }//if
     };
 
@@ -2087,7 +2096,7 @@ var BITS = (function()
 
 
 //+(uint16_t)   Sets/replaces the instance's bitmap index with one newly synthesized from a RGBA8888 tile.
-    BITS.GetBitmapFromRGBA8888Tile = function(src, unshadow, unstroke, ch_offset, alpha_threshold)
+    BITS.GetBitmapFromRGBA8888Tile = function(src, unshadow, unstroke, ch_offset, alpha_threshold, unshd_threshold)
     {
         var dest = null;
     
@@ -2097,7 +2106,7 @@ var BITS = (function()
 
             if (unshadow) 
             {
-                BITS.RecoverShadowAlphaInRGBA8888Tile(src, ch_offset, alpha_threshold);
+                BITS.RecoverShadowAlphaInRGBA8888Tile(src, ch_offset, alpha_threshold, unshd_threshold);
             }//if
             
             if (unstroke)
@@ -2139,7 +2148,7 @@ var BITS = (function()
     };
 
 //+ (void)  Sets the ch_offset (alpha) value to 0 when R, G and B pixels are all below alpha_threshold.
-    BITS.RecoverShadowAlphaInRGBA8888Tile = function(src, ch_offset, alpha_threshold)
+    BITS.RecoverShadowAlphaInRGBA8888Tile = function(src, ch_offset, alpha_threshold, unshd_threshold)
     {
         if (src != null)
         {
@@ -2161,9 +2170,9 @@ var BITS = (function()
                     y_width_x = (y_width + x)|0;
                 
                     if (src[(y_width_x + ac)|0]  > alpha_threshold
-                     && src[(y_width_x + rc)|0] <= alpha_threshold
-                     && src[(y_width_x + gc)|0] <= alpha_threshold
-                     && src[(y_width_x + bc)|0] <= alpha_threshold)
+                     && src[(y_width_x + rc)|0] <= unshd_threshold
+                     && src[(y_width_x + gc)|0] <= unshd_threshold
+                     && src[(y_width_x + bc)|0] <= unshd_threshold)
                     {
                         src[(y_width_x + ac)|0] = 0;
                     }//if
