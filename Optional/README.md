@@ -19,6 +19,9 @@ First, in whatever is including bitstore.js already:
 importScripts("png_zlib_worker_min.js");
 ```
 
+(Note: in the 2015-01-28 release, the above is unnecessary if using png_zlib_worker_min.js purely from web workers.)
+
+
 Next, in your init for LBITs:
 
 ```
