@@ -102,6 +102,10 @@
 //
 // 
 
+// 2015-01-28 ND: 1. No longer require png.js namespace to resolve if using web workers. (as they must use their own instance)
+//                   Fallback if worker creation fails will verify png.js at that time, and activate Canvas mode if not present.
+//                   This prevents needing to load png.js unnecessarily when using web worker mode.
+//                2. Fix for issue where non-fatal exception was generated if _log was enabled.
 // 2014-07-21 ND: bugfix for some edge cases of inlined GetBit and BITS extent check
 // 2014-07-21 ND: new parameter: img_unshd_threshold: sets the RGB channel threshold for considering something "shadow".  default: 1.
 // 2014-07-20 ND: bugfix for old localStorage cache not getting purged
@@ -313,22 +317,25 @@ var LBITS = (function()
         this.img_unshd_threshold     = 1;
   
         // temp / constructor only
-        var has_libpng       =  this.Has_libpng(); 
+        
         var requested_libpng = false;
         var requested_multi  = false;
+        var will_give_multi  =        options != null
+                               &&     options.net_multithreading 
+                               &&    !options.img_io_canvas_enable
+                               && (  !options.idx_lazyload_detail 
+                                   || options.idx_lazyload_dim)
+                               && (   options.net_worker_inc0_url != null 
+                                   || options.net_worker_inc1_url != null 
+                                   || options.net_worker_inc2_url != null);
+        var has_libpng       =  will_give_multi || this.Has_libpng();
                
         if (!has_libpng) this.img_io_canvas_enable = true;
         
         
         if (options != null)
         {
-            this.net_multithreading     =      options.net_multithreading 
-                                          &&  !options.img_io_canvas_enable
-                                          && has_libpng
-                                          && (!options.idx_lazyload_detail || options.idx_lazyload_dim)
-                                          && (   options.net_worker_inc0_url != null 
-                                              || options.net_worker_inc1_url != null 
-                                              || options.net_worker_inc2_url != null);
+            this.net_multithreading     = will_give_multi;
             this.net_worker_inc0_url    = options.net_worker_inc0_url;
             this.net_worker_inc1_url    = options.net_worker_inc1_url;
             this.net_worker_inc2_url    = options.net_worker_inc2_url;
@@ -575,6 +582,12 @@ var LBITS = (function()
         {
             console.log("LBITS.CreateWorker: [%d] ERR: An unknown fatal error occurred while creating the worker. Multithreading disabled.", this.layerId);
             this.net_multithreading = false;
+            
+            if (!this.Has_libpng())
+            {
+                console.log("LBITS.CreateWorker: [%d] ERR: png.js fallback inoperable. Enabling Canvas mode.", this.layerId);
+                this.img_io_canvas_enable = true;
+            }//if
         }//catch
     };
     
@@ -1436,7 +1449,7 @@ var LBITS = (function()
         if (bs != null && this.net_cache_enable)
         {
             var ivs = bs.DecomposeIndexIntoIV();
-            if (this._log) console.log("LBITS.AddBitstoreToLocalCache: [%d] Setting cache: (%d, %d) @ %d.... %d len and %d len", this.layerId, x, y, z, ivs[0].length, ivs[1].length);
+            if (this._log) console.log("LBITS.AddBitstoreToLocalCache: [%d] Setting cache: (%d, %d) @ %d.... %d len and %d len", this.layerId, bs.x, bs.y, bs.z, ivs[0].length, ivs[1].length);
             this.StorageSet(this.GetStorageKey(bs.x, bs.y, bs.z), ivs[0], ivs[1]);  
         }//if
     };
@@ -1737,13 +1750,20 @@ var BITS = (function()
 
 
     
-//- (bool)  Extent check -- faster.  Does not check layerId.
+//- (bool)  Extent check -- faster.  Does not check layerId.  Only valid for z >= this.z
     BITS.prototype.CanIndexTile = function(x, y, z, extent_u32)
     {
         if (extent_u32 == null) extent_u32 = BITS.c_GetNewPxExtentVector_u32(x, y, z, this._defExZ);
 
         return !(   extent_u32[2] < this.extent[0] || extent_u32[0] >= this.extent[2]
                  || extent_u32[3] < this.extent[1] || extent_u32[1] >= this.extent[3]);
+
+/*
+        return extent_u32[0] >= this.extent[0] && extent_u32[0] < this.extent[2] 
+            && extent_u32[2] >= this.extent[0] && extent_u32[2] < this.extent[2]
+            && extent_u32[1] >= this.extent[1] && extent_u32[1] < this.extent[3] 
+            && extent_u32[3] >= this.extent[1] && extent_u32[3] < this.extent[3];
+            */
     };
     
     
@@ -1765,6 +1785,9 @@ var BITS = (function()
         {
             for (bitX = px0; bitX <= px1; bitX=(bitX+1)|0) 
             {
+                // todo: figure out why the inlined form is producing false positivies in some cases
+                //if (this.GetBit(bitX, bitY))
+                
                 bitIdx = (((((bitY>>>2)|0)<<6)|0)+((bitX>>>2)|0))|0;
                                 
                 if ((this.data[bitIdx] & (((1<<((((((bitY-((((bitY>>>2)|0)<<2)|0))|0)<<2)|0)+((bitX-((((bitX>>>2)|0)<<2)|0))|0))|0))|0)|0))|0 != 0) // inlined GetBit
@@ -1772,6 +1795,17 @@ var BITS = (function()
                     retVal = true;
                     break;
                 }//if
+                
+                /*
+                bitIdx = (((((bitY>>>2)|0)<<6)|0)+((bitX>>>2)|0))|0;
+            
+                if (    this.data[bitIdx] != 0         // has at least 1px on
+                    && (this.data[bitIdx]  = 0xFFFF    // if all bits are on, obviously true
+                    || (this.data[bitIdx]  & (1 << (((bitY-((bitY>>>2)<<2))<<2) + (bitX-((bitX>>>2)<<2))))) != 0)) // inlined
+                {
+                    retVal = true; break;
+                }//if
+                */
             }//for
             if (retVal) break;
         }//for
@@ -2003,7 +2037,6 @@ var BITS = (function()
                 for (x=0; x<256; x=(x+1)|0)
                 {
                     bitIdx = (((((y>>>2)|0)<<6)|0)+((x>>>2)|0))|0;
-                    
                     if ((src_u16[bitIdx] & (((1<<((((((y-((((y>>>2)|0)<<2)|0))|0)<<2)|0)+((x-((((x>>>2)|0)<<2)|0))|0))|0))|0)|0))|0 != 0) // inlined GetBit
                     {
                         if (y > maxY) maxY = y;
