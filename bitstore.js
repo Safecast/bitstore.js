@@ -1,4 +1,4 @@
-// bitstore.js --   Author: Nick Dolezal, 2013-2014
+// bitstore.js --   Author: Nick Dolezal, 2013-2015
 //                Abstract: General bitmap indexing solution for improving raster tile map performance.
 //               Copyright: This code is released into the public domain.
 //
@@ -1785,9 +1785,6 @@ var BITS = (function()
         {
             for (bitX = px0; bitX <= px1; bitX=(bitX+1)|0) 
             {
-                // todo: figure out why the inlined form is producing false positivies in some cases
-                //if (this.GetBit(bitX, bitY))
-                
                 bitIdx = (((((bitY>>>2)|0)<<6)|0)+((bitX>>>2)|0))|0;
                                 
                 if ((this.data[bitIdx] & (((1<<((((((bitY-((((bitY>>>2)|0)<<2)|0))|0)<<2)|0)+((bitX-((((bitX>>>2)|0)<<2)|0))|0))|0))|0)|0))|0 != 0) // inlined GetBit
@@ -1795,17 +1792,6 @@ var BITS = (function()
                     retVal = true;
                     break;
                 }//if
-                
-                /*
-                bitIdx = (((((bitY>>>2)|0)<<6)|0)+((bitX>>>2)|0))|0;
-            
-                if (    this.data[bitIdx] != 0         // has at least 1px on
-                    && (this.data[bitIdx]  = 0xFFFF    // if all bits are on, obviously true
-                    || (this.data[bitIdx]  & (1 << (((bitY-((bitY>>>2)<<2))<<2) + (bitX-((bitX>>>2)<<2))))) != 0)) // inlined
-                {
-                    retVal = true; break;
-                }//if
-                */
             }//for
             if (retVal) break;
         }//for
