@@ -1,4 +1,4 @@
-// bitstore.js --   Author: Nick Dolezal, 2013-2015
+// bitstore.js --   Author: Nick Dolezal, 2013-2014
 //                Abstract: General bitmap indexing solution for improving raster tile map performance.
 //               Copyright: This code is released into the public domain.
 //
@@ -99,29 +99,53 @@
 //    b. If not, decompose and reproject the global index into a list of many additional tiles.
 // 5. Create bitstores for 0 - n additional tiles found in #3
 // 
-//
-// 
 
+// png.js erratum note:
+// --------------------
+// Note that png.js seems to have problems decoding PNGs with < 8 bits per pixel. This was noted in combination with PNG_COLOR_TYPE_PALETTE
+// and a single tRNS value.  If your tilesets have such data and you encounter this bug, workarounds include re-encoding the PNGs or
+// setting bitstore.js to use HTML5 Canvas mode to decode them instead.
+
+
+// Revision History
+// ----------------
+// 2015-02-12 ND: Bugfix: Local storage try/catch added for IE.  It seems even IE11 cannot store UTF-16.
+//                        There are currently no plans for any other workarounds for IE standards compliance issues.
+// 2015-02-09 ND: Less resource use, improved performance, and minor bugfix.
+//
+//                1. Improvement: Faster, 4x more efficient local storage caching.
+//                  a. Bitmaps are now stored in local storage as a binary UTF-16 string, not encoded hex characters.
+//                  b. Old hex format: now officially deprecated.  Still supported via "net_src_hex_format" only.
+//                  c. Old hex format in stale caches: will be purged automatically, comrade.
+//                2. Bugfix: Inlined web worker mime type.  No more console spam.
+//                3. Improvement: Web workers are now automatically terminated upon batch completion.
+//                  a. This recovers ~1 MB RAM each, and allows more web workers to be used for the domain by the browser elsewhere.
+//                  b. In the (unlikely and unforseen event) they would be needed after the work is completed, fallback code will
+//                     still function as expected.  (though on the main thread)
+//
 // 2015-01-28 ND: 1. No longer require png.js namespace to resolve if using web workers. (as they must use their own instance)
 //                   Fallback if worker creation fails will verify png.js at that time, and activate Canvas mode if not present.
 //                   This prevents needing to load png.js unnecessarily when using web worker mode.
 //                2. Fix for issue where non-fatal exception was generated if _log was enabled.
-// 2014-07-21 ND: bugfix for some edge cases of inlined GetBit and BITS extent check
-// 2014-07-21 ND: new parameter: img_unshd_threshold: sets the RGB channel threshold for considering something "shadow".  default: 1.
-// 2014-07-20 ND: bugfix for old localStorage cache not getting purged
-// 2014-07-15 ND: bugfix for remainder chunk handling in hex string serialization/deserialization
-// 2014-06-27 ND: most processing now can happen in web workers.
-//                inlined bit tests, better loop unrolls for non-p2s, fix for max idx z not being enforced.
-//                move try/catch blocks to own functions so they don't block V8 optimizations.
-//                now purges old caches for a layer.
-// 2014-06-23 ND: changed alt lazy load mode to force load on first access, regardless of zoom level.  also will queue if master not done.
-// 2014-06-22 ND: bugfix: typo in min tile x/y input sanity check
-// 2014-06-22 ND: bugfix: copypasta typos in layer extent iterative refinement step
-// 2014-06-22 ND: bugfix: cached index would save itself to the store again (wasting I/O)
-// 2014-06-22 ND: added multithreading
-// 2014-06-21 ND: refactoring
-// 2014-06-19 ND: added date to URL for tile request due to browser caching issues where the HTTP last-modified was correctly reported (odd)
-// 2014-06-18 ND: during index autoselection, if the number of tiles exceeds the constraint, it is retried at a lower zoom level instead of
+//
+// 2014-07-21 ND: Bugfix for some edge cases of inlined GetBit and BITS extent check
+// 2014-07-21 ND: New parameter: img_unshd_threshold: sets the RGB channel threshold for considering something "shadow".  default: 1.
+// 2014-07-20 ND: Bugfix for old localStorage cache not getting purged
+// 2014-07-15 ND: Bugfix for remainder chunk handling in hex string serialization/deserialization
+//
+// 2014-06-27 ND: - Most processing now can happen in web workers.
+//                - Inlined bit tests, better loop unrolls for non-p2s, fix for max idx z not being enforced.
+//                - Move try/catch blocks to own functions so they don't block V8 optimizations.
+//                - Now purges old caches for a layer.
+//
+// 2014-06-23 ND: Changed alt lazy load mode to force load on first access, regardless of zoom level.  also will queue if master not done.
+// 2014-06-22 ND: Bugfix: typo in min tile x/y input sanity check
+// 2014-06-22 ND: Bugfix: copypasta typos in layer extent iterative refinement step
+// 2014-06-22 ND: Bugfix: cached index would save itself to the store again (wasting I/O)
+// 2014-06-22 ND: Added multithreading
+// 2014-06-21 ND: Refactoring
+// 2014-06-19 ND: Added date to URL for tile request due to browser caching issues where the HTTP last-modified was correctly reported (odd)
+// 2014-06-18 ND: During index autoselection, if the number of tiles exceeds the constraint, it is retried at a lower zoom level instead of
 //                being truncated, which provided poor indexing.
 
 var LBITSOptions = (function()
@@ -364,20 +388,27 @@ var LBITS = (function()
         }//if
         
         
-        
         // ***** "private" ivars ******
         this._log             = false;
         this._wantedForceLoad = false;
         this._worker          = null;
         this._worker_blob     = null;
         this._worker_blobURL  = null;
+        this._dispatch_n      = 0;
+        this._dispatch_cb_n   = 0;
         
         
         if (this.net_multithreading)
         {
             this.CreateWorker();
-        }//if        
+        }//if
         
+        if (this.net_cache_enable)
+        {
+            this.net_cache_enable = this.TestLocalStorage();
+            
+            if (!this.net_cache_enable && this._log) console.log("LBITS: [%d] init: Warning: Local storage inoperable / not UTF-16 compliant.", this.layerId);
+        }//if
         
         // <log_txt>      
         if (requested_multi && !this.net_multithreading && this._log)
@@ -441,6 +472,25 @@ var LBITS = (function()
         }//catch
         
         return has_libpng;
+    };
+    
+    LBITS.prototype.TestLocalStorage = function()
+    {
+        var can_store = false;
+        
+        try
+        {
+            localStorage.setItem("TEST", String.fromCharCode(65535));
+            can_store = true;
+        }//try
+        catch(err)
+        {
+            can_store = false;
+        }//catch
+        
+        localStorage.removeItem("TEST");
+        
+        return can_store;
     };
     
     
@@ -513,7 +563,8 @@ var LBITS = (function()
               +     "}"
               +     "else if (e.data.op == 'IV_BITS_E')"
               +     "{"
-              +         "var bs_u16 = LBITS.DecodeBitmapIndexFromHexString(e.data.userData[4], null);"
+              //+         "var bs_u16 = LBITS.DecodeBitmapIndexFromHexString(e.data.userData[4], null);" // 2015-02-09 ND: testing new binary string replacement
+              +         "var bs_u16 = LBITS.DecodeBitmapIndexFromBinaryString(e.data.userData[4]);"
               +         "e.data.userData[4] = null;"
               +         "var ex_u32 = BITS.c_GetPixelExtentFromBitstore(bs_u16, e.data.userData[0], e.data.userData[1], e.data.userData[2]);"
               +         "self.postMessage({op:e.data.op, user:e.data.userData, ab:bs_u16.buffer, ex:ex_u32.buffer}, [bs_u16.buffer, ex_u32.buffer]);"
@@ -536,7 +587,7 @@ var LBITS = (function()
         
         try
         {
-            this._worker_blob    = new Blob([sauce]);
+            this._worker_blob    = new Blob([sauce], { type: "application/javascript" });
             this._worker_blobURL = window.URL.createObjectURL(this._worker_blob);
             this._worker         = new Worker(this._worker_blobURL);
             
@@ -574,9 +625,16 @@ var LBITS = (function()
                     console.log("LBITS.CreateWorker: [%d] ERR: Worker thread could not load png.js, zlib.js and/or bitstore.js.  Multithreading disabled.", this.layerId);
                     this.net_multithreading = false;
                 }//else if
+                
+                this._dispatch_cb_n++;
+                
+                setTimeout(function() {
+                    this.KillWorkerIfPossible(); // poor worker.
+                }.bind(this), 5000);
             }.bind(this);
         
             this.WorkerDispatchAsync("INCLUDE", null, null);
+            this._dispatch_cb_n++; // include doesn't return a message.
         }//try
         catch(err)
         {
@@ -594,10 +652,36 @@ var LBITS = (function()
 //- (void)
     LBITS.prototype.WorkerDispatchAsync = function(op, url, userData)
     {
+        this._dispatch_n++;
         this._worker.postMessage({op:op, url:url, userData:userData});
     };
-    
-    
+
+//- (void)  Determine if nothing more to load to recover thread resources.
+    LBITS.prototype.KillWorkerIfPossible = function()
+    {    
+        if (     this._worker     != null
+            &&   this._dispatch_n > 2
+            &&   this._dispatch_n <= this._dispatch_cb_n
+            && (!this.idx_lazyload_detail == false
+                || (this._didLazyLoad && this.bitstores.length > 0)) )
+        {
+            this._worker.terminate();
+            URL.revokeObjectURL(this._worker_blobURL);
+            this._worker         = null;
+            this._worker_blobURL = null;
+            this._worker_blob    = null;
+            
+            this.net_multithreading = false;
+            
+            if (this._log) console.log("LBITS.KillWorkerIfPossible: [%d] Worker terminated normally after %d dispatches.", this.layerId, this._dispatch_n);
+            
+            if (!this.Has_libpng())
+            {
+                if (this._log) console.log("LBITS.KillWorkerIfPossible: [%d] ERR: png.js fallback inoperable. Enabling Canvas mode.", this.layerId);
+                this.img_io_canvas_enable = true;
+            }//if
+        }//if
+    };
     
     
     
@@ -1253,7 +1337,7 @@ var LBITS = (function()
 //- (const char*)
     LBITS.prototype.GetStorageKey = function(x, y, z) 
     {
-        return "bs_iv_vec_" + this.lastModifiedUnix + "_" + this.layerId + "_" + z + "_" + x + "_" + y + "_b16.txt";
+        return "bs_iv_vec_" + this.lastModifiedUnix + "_" + this.layerId + "_" + z + "_" + x + "_" + y + "_utf16.txt";
     };
     
 // ******************************************************************************************************
@@ -1440,7 +1524,8 @@ var LBITS = (function()
     LBITS.prototype.StorageGet = function(key_iv) 
     {
         var    item  = !this.net_cache_enable ? null : localStorage.getItem(key_iv);
-        return item == null ? null : LBITS.DecodeBitmapIndexFromHexString(item, null);
+        //return item == null ? null : LBITS.DecodeBitmapIndexFromHexString(item, null); // 2015-02-09 ND: testing more efficient localStorage read
+        return item == null ? null : LBITS.DecodeBitmapIndexFromBinaryString(item);
     };
     
 //- (void)
@@ -1465,7 +1550,10 @@ var LBITS = (function()
         var tl = new Array();
         var key;
         
-        // bs_iv_vec_12345_2_0_0_0_b16.txt
+        // bs_iv_vec_12345_2_0_0_0_utf16.txt  <-- new
+        //                         9876543210
+        
+        // bs_iv_vec_12345_2_0_0_0_b16.txt    <-- old
         // 0         1         2
         // 0123456789012345678901234567890
         
@@ -1475,8 +1563,9 @@ var LBITS = (function()
 
             if (   key.length > 20
                 && key.substring( 0, 10) == mb
-                && key.substring(16, le) == ls
-                && key.substring(10, 15) != ds)
+                && ((   key.substring(16, le) == ls
+                     && key.substring(10, 15) != ds)
+                     || key.substring(key.length - 9) != "utf16.txt")) // 2015-02-09 ND: add purge for older 4-bit hex encoding
             {
                 if (this._log) console.log("LBITS.PurgeOldCacheForLayer: [%d] Purging %d bytes: (%s)", this.layerId, localStorage[key].length<<1, key);
                 
@@ -1546,6 +1635,28 @@ var LBITS = (function()
 // LBITS -- Class (Static) Methods -- Deserialized Text <-> Bitmap Index Conversion
 // ******************************************************************************************************
 
+    // 2015-02-09 ND: Attempt to make this faster by storing binary UTF-16.  Would improve efficiency by > 4x.
+    LBITS.DecodeBitmapIndexFromBinaryString = function(src_iv_str)
+    {
+        var i, i_u16 = null, v_u16 = null, dest_i_str = null, dest_v_str = null;
+        var n = src_iv_str.length>>>1;
+        i_u16 = new Uint16Array(n);
+        v_u16 = new Uint16Array(n);
+        
+        for (i=0; i<n; i++)
+        {
+            i_u16[i] = src_iv_str.charCodeAt(i);
+        }//for
+        
+        for (i=n; i<src_iv_str.length; i++)
+        {
+            v_u16[i-n] = src_iv_str.charCodeAt(i);
+        }//for
+               
+        return LBITS.new_ivtovec_u16(i_u16, v_u16, 4096);
+    };
+    
+// 2015-02-09 ND: legacy hex format only
 //- (uint16_t*)         Accepts separate strings or a combined buffer in src_i_str with values following indices.
     LBITS.DecodeBitmapIndexFromHexString = function(src_i_str, src_v_str) 
     {
@@ -1595,7 +1706,7 @@ var LBITS = (function()
     };
     
 
-
+// 2015-02-09 ND: legacy hex format only
 //- (uint16_t*)     New wrapper for vhtoi_u16
     LBITS.new_vhtoi_u16 = function(src_str)
     {
@@ -1603,7 +1714,8 @@ var LBITS = (function()
         LBITS.vhtoi_u16(dest_u16, src_str);
         return dest_u16;
     };
-    
+
+// 2015-02-09 ND: legacy hex format only
 //- (void)      // sets values in uint16_t* buffer dest_u16 converted from string src_str of 4-char base-16 hex values
     LBITS.vhtoi_u16 = function(dest_u16, src_str)
     {
@@ -1624,7 +1736,6 @@ var LBITS = (function()
             dest_u16[i] = parseInt(('0x' + src_str.substring(i << 2, (i << 2) + 4)));
         }//for
     };
-    
 
     // **** END CLASS ****
     
@@ -1757,13 +1868,6 @@ var BITS = (function()
 
         return !(   extent_u32[2] < this.extent[0] || extent_u32[0] >= this.extent[2]
                  || extent_u32[3] < this.extent[1] || extent_u32[1] >= this.extent[3]);
-
-/*
-        return extent_u32[0] >= this.extent[0] && extent_u32[0] < this.extent[2] 
-            && extent_u32[2] >= this.extent[0] && extent_u32[2] < this.extent[2]
-            && extent_u32[1] >= this.extent[1] && extent_u32[1] < this.extent[3] 
-            && extent_u32[3] >= this.extent[1] && extent_u32[3] < this.extent[3];
-            */
     };
     
     
@@ -2054,9 +2158,31 @@ var BITS = (function()
 
         return results;
     };
-
-
+    
+    // 2015-02-09 ND: Attempt to make this faster by storing binary UTF-16.  Would improve efficiency by > 4x.
     BITS.c_DecomposeIndexIntoIV = function(src_u16)
+    {
+        if (src_u16 == null)
+        {
+            return null;
+        }//if
+    
+        var dest_i_str = "", dest_v_str = "";
+        
+        for (var i=0; i<4096; i=(i+1)|0)
+        {
+            if (src_u16[i] != 0) // inlined
+            {
+                dest_i_str += String.fromCharCode(i);
+                dest_v_str += String.fromCharCode(src_u16[i]);
+            }//if
+        }//for
+        
+        return [dest_i_str, dest_v_str];  
+    };
+
+    // 2015-02-09 ND: renamed original, unused
+    BITS.c_DecomposeIndexIntoIV_LegacyHexString = function(src_u16)
     {
         if (src_u16 == null)
         {
@@ -2426,12 +2552,6 @@ var BITS = (function()
     {
         return 23;
     };
-    
-    
-
-    
-    
-    
     
     return BITS;
 })();
