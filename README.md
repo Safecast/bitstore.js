@@ -24,7 +24,7 @@ Do you have a raster tile layer with holes in it?  Or is it clipped to a shoreli
 Then yes, it probably can.
  
 ####Is there a demo?
-Yes, as of 2014-07-01.  See http://safecast.org/tilemap
+Yes, as of 2014-07-01.  See http://safecast.org/tilemap (source code: https://github.com/Safecast/Tilemap)
 
 In particular, right click on the map and select "Bitmap Index Visualization" or "Show All Bitmap Indices", which renders all the bitmap indices created by this library for a production application. (via the futuristic wonders of client-side uncompressed GIF89A)
 
