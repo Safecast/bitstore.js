@@ -109,6 +109,26 @@
 
 // Revision History
 // ----------------
+// 2015-09-01 ND: Support 512x512 tiles, performance improvements, code cleanup.
+//
+//                1. Tile width and height can now be specified in an LBITSOptions object.  Width/height are assumed equal,
+//                   and should be powers of two.
+//                2. Internal coordinate system is now zoom level 21 instead of zoom level 23, to prevent uint32_t overflows
+//                   with larger tile sizes.
+//                3. Cached bitstores now have a stream descriptor header with width/height.  The format is:
+//
+//              Byte   0   1   2   3   4   5   6   7   8   9   10  11  12  13  14  15              n
+//                   +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+-------------+
+//                   |'B'|NUL|'S'|NUL|'V'|NUL|'3'|NUL|<W>|<W>|<H>|<H>|NUL|NUL|NUL|NUL|   <DATA>    |
+//                   +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+-------------+
+//                   |  Magic Bytes  | Version Code  | Width | Height|    Padding    |   Payload   |
+//                   |            UTF-16             |    uint16_t   |               |   uint16_t  |
+//
+//                4. All asm.js-style |0 have been removed.
+//                5. Legacy 6-bit hex encoding support for bitstores has been removed, including loading from a URL.
+//                6. HTML5 Canvas PNG decode refactored into a single step for performance.  Unfortunately, png.js was
+//                   still somewhat faster in testing.
+//
 // 2015-02-12 ND: Bugfix: Local storage try/catch added for IE.  It seems even IE11 cannot store UTF-16.
 //                        There are currently no plans for any other workarounds for IE standards compliance issues.
 // 2015-02-09 ND: Less resource use, improved performance, and minor bugfix.
@@ -158,8 +178,6 @@ var LBITSOptions = (function()
         this.net_worker_inc2_url    = null;
         
         this.net_cache_enable       = true;
-        this.net_src_png_format     = true;
-        this.net_src_hex_format     = false;
         this.net_url_append_enable  = true;
 
         this.idx_max_bitmap_n       = 256;
@@ -175,6 +193,8 @@ var LBITSOptions = (function()
         this.img_ch_offset          = 3;
         this.img_alpha_threshold    = 1;
         this.img_unshd_threshold    = 1;
+        this.img_width              = 256;
+        this.img_height             = 256;
         
         // lazy shorthand aliases for the above
         
@@ -183,8 +203,6 @@ var LBITSOptions = (function()
         this.url1  = null;
         this.url2  = null;
         this.cache = true;
-        this.png   = true;
-        this.hex   = true;
         this.appnd = true;
         this.maxn  = 256;
         this.maxz  = 8;
@@ -197,13 +215,13 @@ var LBITSOptions = (function()
         this.choff = 3;
         this.alpha = 1;
         this.shdtr = 1;
+        this.w     = 256;
+        this.h     = 256;
         
         for (var n in arguments[0]) { this[n] = arguments[0][n]; }
         
         this.multi = this.i2b(this.multi);
         this.cache = this.i2b(this.cache);
-        this.png   = this.i2b(this.png);
-        this.hex   = this.i2b(this.hex);
         this.apnd  = this.i2b(this.appnd);
         this.date  = this.i2b(this.date);
         this.ll    = this.i2b(this.ll);
@@ -214,8 +232,6 @@ var LBITSOptions = (function()
         
         this.net_multithreading    = this.i2b(this.net_multithreading);
         this.net_cache_enable      = this.i2b(this.net_cache_enable);
-        this.net_src_png_format    = this.i2b(this.net_src_png_format);
-        this.net_src_hex_format    = this.i2b(this.net_src_hex_format);
         this.net_url_append_enable = this.i2b(this.net_url_append_enable);
         this.idx_datecheck_enable  = this.i2b(this.idx_datecheck_enable);
         this.idx_lazyload_detail   = this.i2b(this.idx_lazyload_detail);
@@ -229,8 +245,6 @@ var LBITSOptions = (function()
         this.net_worker_inc1_url    = this.url1 != null ? this.url1 : this.net_worker_inc1_url;
         this.net_worker_inc2_url    = this.url2 != null ? this.url2 : this.net_worker_inc2_url;
         this.net_cache_enable       = this.net_cache_enable      && this.cache;
-        this.net_src_png_format     = this.net_src_png_format    && this.png;
-        this.net_src_hex_format    |= this.hex;
         this.net_url_append_enable  = this.net_url_append_enable && this.appnd;
         this.idx_max_bitmap_n       = this.maxn != 256 ? this.maxn : this.idx_max_bitmap_n;
         this.idx_max_bitmap_z       = this.maxz !=   8 ? this.maxz : this.idx_max_bitmap_z;
@@ -243,6 +257,8 @@ var LBITSOptions = (function()
         this.img_ch_offset         |= this.choff;
         this.img_alpha_threshold   |= this.alpha;
         this.img_unshd_threshold   |= this.shdtr;
+        this.img_width              = this.w != null && this.w != 0 && this.w != 256 ? this.w : this.img_width;
+        this.img_height             = this.h != null && this.h != 0 && this.h != 256 ? this.h : this.img_height;
     }
     
     LBITSOptions.prototype.i2b = function(x)
@@ -259,9 +275,6 @@ var LBITSOptions = (function()
         ,"net_worker_inc1_url  (char*)        [URL] -- Absolute URL to modded png.js, zlib.js, and/or bitstore.js for background web worker."
         ,"net_worker_inc2_url  (char*)        [URL] -- Absolute URL to modded png.js, zlib.js, and/or bitstore.js for background web worker."
         ,"net_cache_enable      (bool) [true|false] -- Enables localStorage cache of bitstore data."
-        ,"net_src_png_format    (bool) [true|false] -- Use a PNG's alpha channel as a data source."
-        ,"net_src_hex_format    (bool) [true|false] -- Exclusive of io_src_png_format.  Use hex string index/value pairs as data"
-                                                       + " source. See caching functions for format specifics."
         ,"net_url_append_enable (bool) [true|false] -- Append ?d=<daysSince1970> to all HTTP URLs to defeat caching."
         ,"idx_max_bitmap_n       (int)  [0...  n]   -- Max number of bitmap indices to create for this layer.  Recommend 256."
         ,"idx_max_bitmap_z       (int)  [0... 23]   -- Max zoom level of tiles to create indices from.  Recommend 6."
@@ -279,6 +292,8 @@ var LBITSOptions = (function()
         ,"img_ch_offset          (int)  [0...  3]   -- PNG, specialized.  For using another color channel instead of the alpha channel."
         ,"img_alpha_threshold    (int)  [0...255]   -- PNG, specialized.  Any alpha pixel this value or above will be considered data."
         ,"img_unshd_threshold    (int)  [0...255]   -- PNG, specialized.  For img_fx_unshadow."
+        ,"img_width"             (int)  [1..4096]   -- PNG, width of tile.  Normally 256.
+        ,"img_height"            (int)  [1..4096]   -- PNG, height of tile. Normally 256.
         ];
         return help;
     }
@@ -322,8 +337,6 @@ var LBITS = (function()
         this.net_worker_inc2_url     = null;
         
         this.net_cache_enable        = true;
-        this.net_src_png_format      = true;
-        this.net_src_hex_format      = false;
         this.net_url_append_enable   = true;
 
         this.idx_max_bitmap_n        = 256;
@@ -339,6 +352,8 @@ var LBITS = (function()
         this.img_ch_offset           = 3;
         this.img_alpha_threshold     = 1;
         this.img_unshd_threshold     = 1;
+        this.img_width               = 256;
+        this.img_height              = 256;
   
         // temp / constructor only
         
@@ -365,8 +380,6 @@ var LBITS = (function()
             this.net_worker_inc2_url    = options.net_worker_inc2_url;
             
             this.net_cache_enable       = options.net_cache_enable;
-            this.net_src_png_format     = options.net_src_png_format;
-            this.net_src_hex_format     = options.net_src_hex_format;
             this.net_url_append_enable  = options.net_url_append_enable;
 
             this.idx_max_bitmap_n       = options.idx_max_bitmap_n;
@@ -382,6 +395,9 @@ var LBITS = (function()
             this.img_ch_offset          = options.img_ch_offset;
             this.img_alpha_threshold    = options.img_alpha_threshold;
             this.img_unshd_threshold    = options.img_unshd_threshold;
+            
+            this.img_width              = options.img_width;
+            this.img_height             = options.img_height;
             
             requested_libpng            = !options.img_io_canvas_enable;
             requested_multi             = options.net_multithreading;
@@ -533,19 +549,8 @@ var LBITS = (function()
               +         "var cb = function(response, userData)"
               +         "{"
               +             "var rgba   = LBITS.GetNewRGBA8888_FromPNG_libpng(response);"
-              +             "var bs_u16 = BITS.GetBitmapFromRGBA8888Tile(rgba, userData[4], userData[5], userData[6], userData[7], userData[8]);"
+              +             "var bs_u16 = BITS.GetBitmapFromRGBA8888Tile(rgba, userData[4], userData[5], userData[6], userData[7], userData[8], userData[9], userData[10]);"
               +             "self.postMessage({op:e.data.op, user:userData, ab:bs_u16.buffer}, [bs_u16.buffer]);"
-              +         "};"
-              +         "LBITS.GetAsync_HTTP(e.data.url, 'arraybuffer', null, cb, e.data.userData); "
-              +     "}"
-              +     "else if (e.data.op == 'GET_BITS_IV')"
-              +     "{"
-              +         "var cb = function(response, userData)"
-              +         "{"
-              +             "var rgba   = LBITS.GetNewRGBA8888_FromPNG_libpng(response);"
-              +             "var bs_u16 = BITS.GetBitmapFromRGBA8888Tile(rgba, userData[4], userData[5], userData[6], userData[7], userData[8]);"
-              +             "var ivs    = BITS.c_DecomposeIndexIntoIV(bs_u16);"
-              +             "self.postMessage({op:e.data.op, ivs0:ivs[0], ivs1:ivs[1], user:userData, ab:bs_u16.buffer}, [bs_u16.buffer]);"
               +         "};"
               +         "LBITS.GetAsync_HTTP(e.data.url, 'arraybuffer', null, cb, e.data.userData); "
               +     "}"
@@ -554,19 +559,18 @@ var LBITS = (function()
               +         "var cb = function(response, userData)"
               +         "{"
               +             "var rgba   = LBITS.GetNewRGBA8888_FromPNG_libpng(response);"
-              +             "var bs_u16 = BITS.GetBitmapFromRGBA8888Tile(rgba, userData[4], userData[5], userData[6], userData[7], userData[8]);"
+              +             "var bs_u16 = BITS.GetBitmapFromRGBA8888Tile(rgba, userData[4], userData[5], userData[6], userData[7], userData[8], userData[9], userData[10]);"
               +             "var ivs    = BITS.c_DecomposeIndexIntoIV(bs_u16);"
-              +             "var ex_u32 = BITS.c_GetPixelExtentFromBitstore(bs_u16, userData[0],userData[1],userData[2]);"
+              +             "var ex_u32 = BITS.c_GetPixelExtentFromBitstore(bs_u16, userData[0],userData[1],userData[2],userData[9],userData[10]);"
               +             "self.postMessage({op:e.data.op, ivs0:ivs[0], ivs1:ivs[1], user:userData, ab:bs_u16.buffer, ex:ex_u32.buffer}, [bs_u16.buffer, ex_u32.buffer]);"
               +         "};"
               +         "LBITS.GetAsync_HTTP(e.data.url, 'arraybuffer', null, cb, e.data.userData); "
               +     "}"
               +     "else if (e.data.op == 'IV_BITS_E')"
               +     "{"
-              //+         "var bs_u16 = LBITS.DecodeBitmapIndexFromHexString(e.data.userData[4], null);" // 2015-02-09 ND: testing new binary string replacement
-              +         "var bs_u16 = LBITS.DecodeBitmapIndexFromBinaryString(e.data.userData[4]);"
+              +         "var bs_u16 = LBITS.StorageStreamDescriptorGetAndDecodeIfVerified(e.data.userData[4], e.data.userData[5], e.data.userData[6]);"
               +         "e.data.userData[4] = null;"
-              +         "var ex_u32 = BITS.c_GetPixelExtentFromBitstore(bs_u16, e.data.userData[0], e.data.userData[1], e.data.userData[2]);"
+              +         "var ex_u32 = BITS.c_GetPixelExtentFromBitstore(bs_u16, e.data.userData[0], e.data.userData[1], e.data.userData[2], e.data.userData[5], e.data.userData[6]);"
               +         "self.postMessage({op:e.data.op, user:e.data.userData, ab:bs_u16.buffer, ex:ex_u32.buffer}, [bs_u16.buffer, ex_u32.buffer]);"
               +     "}"
               + "};"
@@ -587,6 +591,8 @@ var LBITS = (function()
         
         try
         {
+            var d0 = new Date();
+            
             this._worker_blob    = new Blob([sauce], { type: "application/javascript" });
             this._worker_blobURL = window.URL.createObjectURL(this._worker_blob);
             this._worker         = new Worker(this._worker_blobURL);
@@ -595,13 +601,13 @@ var LBITS = (function()
             // a PNG, and convert it to a uint16_t* bitmap index buffer.
             this._worker.onmessage = function(e) 
             {
-                if (e.data.op == "GET_BITS" || e.data.op == "GET_BITS_IV" || e.data.op == "GET_BITS_IV_E" || e.data.op == "IV_BITS_E")
+                if (e.data.op == "GET_BITS_IV_E" || e.data.op == "IV_BITS_E" || e.data.op == "GET_BITS")
                 {
                     var userData = e.data.user;
-                    var bits     = new Uint16Array(e.data.ab);
+                    var bits     = e.data.ab != null ? new Uint16Array(e.data.ab) : null;
                     var needExt  = true;
                     
-                    if (e.data.ivs0 != null && e.data.ivs1 != null) // GET_BITS_IV, GET_BITS_IV_E
+                    if (e.data.ivs0 != null && e.data.ivs1 != null)
                     {
                         this.StorageSet(this.GetStorageKey(userData[0], userData[1], userData[2]), e.data.ivs0, e.data.ivs1);
                     }//if
@@ -635,6 +641,10 @@ var LBITS = (function()
         
             this.WorkerDispatchAsync("INCLUDE", null, null);
             this._dispatch_cb_n++; // include doesn't return a message.
+            
+            var d1 = new Date();
+            
+            if (this._log) console.log("LBITS.CreateWorker: [%d]: Worker created in %d ms.", this.layerId, d1.getTime() - d0.getTime());
         }//try
         catch(err)
         {
@@ -751,7 +761,7 @@ var LBITS = (function()
         {
             var neededProc = false;
             
-            for (var i=0; i<this.bitstores.length; i=(i+1)|0)
+            for (var i=0; i<this.bitstores.length; i++)
             {
                 var bs = this.bitstores[i];
                 
@@ -796,7 +806,7 @@ var LBITS = (function()
         
         if (this.layerId == layerId && this.isReady)
         {
-            if (this.idx_lazyload_detail && !this._didLazyLoad) { this.FinishLazyLoadInit(); }//if // z > this.minZ + 8
+            if (this.idx_lazyload_detail && !this._didLazyLoad) { this.FinishLazyLoadInit(); }
         
             shouldLoad =    z >= this.minZ
                          && z <= this.maxZ 
@@ -809,7 +819,7 @@ var LBITS = (function()
             var neededProc = false;
             var bs         = null;
             
-            for (var i=0; i<this.bitstores.length; i=(i+1)|0)
+            for (var i=0; i<this.bitstores.length; i++)
             {
                 bs = this.bitstores[i];
             
@@ -852,17 +862,13 @@ var LBITS = (function()
     LBITS.prototype.IsTileInExtent = function(x, y, z, extent_u32)
     {
         if (this.extent == null) return true;
-        if (extent_u32  == null) extent_u32 = BITS.c_GetNewPxExtentVector_u32(x, y, z, this._defExZ);
+        if (extent_u32  == null) extent_u32 = BITS.c_GetNewPxExtentVector_u32(x, y, z, this._defExZ, this.img_width, this.img_height);
         
         return !(   extent_u32[2] < this.extent[0] || extent_u32[0] > this.extent[2]
                  || extent_u32[3] < this.extent[1] || extent_u32[1] > this.extent[3]);
     };
     
-    
-    
-    
-    
-    
+
 //- (void)   either get the initial layer extent approximation from the master tile, or refine it with data from additional indices.
     LBITS.prototype.UpdateLayerExtentFromBitstorePixelExtent = function(px)
     {
@@ -872,8 +878,8 @@ var LBITS = (function()
             this.extent[0] = 0xFFFFFFFF; 
             this.extent[1] = 0xFFFFFFFF;
         }//if
-
-        BITS.c_vPixelExtentToMercExtent_u32(px);
+        
+        BITS.c_vPixelExtentToMercExtent_u32(px, this.img_width, this.img_height);
 
         if (px[5] >= this.extent[12]) { if (px[0] < this.extent[0]) { this.extent[0] = px[0]; this.extent[12] = px[5]; }
                                         if (px[2] < this.extent[0]) { this.extent[0] = px[2]; this.extent[12] = px[5]; } }
@@ -885,9 +891,6 @@ var LBITS = (function()
                                         if (px[1] > this.extent[3]) { this.extent[3] = px[1]; this.extent[15] = px[5]; } }
     };    
     
-    
-
-
 
 // ******************************************************************************************************
 // LBITS -- Creation -- BIT Creation
@@ -896,7 +899,7 @@ var LBITS = (function()
 //- (void)
     LBITS.prototype.AddBitstoreHusk = function(x, y, z)
     {
-        var bs = new BITS(this.layerId, x, y, z, null, false);
+        var bs = new BITS(this.layerId, x, y, z, this.img_width, this.img_height, null, false);
         this.bitstores.push(bs);
         bs.needGet = true;
         bs.getting = false;
@@ -949,7 +952,8 @@ var LBITS = (function()
 //- (void)
     LBITS.prototype.AddBitstoreFromBitmapIndex_NoLazyLoad = function(bits, x, y, z, shouldUpdateExtent)
     {
-        var bs = new BITS(this.layerId, x, y, z, bits, true);
+        var bs = new BITS(this.layerId, x, y, z, this.img_width, this.img_height, bits, true);
+                
         this.bitstores.push(bs);
         
         if (shouldUpdateExtent)
@@ -1028,7 +1032,7 @@ var LBITS = (function()
 //- (void)
     LBITS.prototype.AddBitstoreFromRGBA8888_NoLazyLoad = function(rgba, x, y, z)
     {
-        var bs = new BITS(this.layerId, x, y, z, null, false);
+        var bs = new BITS(this.layerId, x, y, z, this.img_width, this.img_height, null, false);
         this.bitstores.push(bs);
         bs.isReady = true;        
         
@@ -1115,8 +1119,10 @@ var LBITS = (function()
     LBITS.prototype.FindOptimalSingleIndex = function()
     {
         var _xOut=0,_yOut=0,_zOut=0,_isComplete=true;
+        
+        var max_single_index_z = LBITS.GetMaxZoomLevelSingleIndexForTileWidthHeightPx(this.img_width, this.img_height); // 2015-08-24 ND: remove hardcoded w/h=256 assumption
     
-        if (this.maxZ > 8)                      // Hard way: see if entire extent fits into some nice little tile somewhere.
+        if (this.maxZ > max_single_index_z)                 // Hard way: see if entire extent fits into some nice little tile somewhere. // 2015-08-24 ND: was > 8
         {
             var newZ,i,px0,px1,py0,py1,px_extent=null;
             var bs = this.FindBitstoreWithXYZ(-1, -1, this.minZ);
@@ -1124,10 +1130,11 @@ var LBITS = (function()
             if (bs != null)
             {
                 px_extent = bs.GetPixelExtentFromBitstore();
-                BITS.c_vPixelExtentToMercExtent_u32(px_extent); // use actual pixel extent instead of gross tile extent
+                BITS.c_vPixelExtentToMercExtent_u32(px_extent, this.img_width, this.img_height); // use actual pixel extent instead of gross tile extent
             }//if
 
-            newZ        = this.maxZ - 8;
+            //newZ        = this.maxZ - 8;
+            newZ        = this.maxZ - max_single_index_z;
             _isComplete = false;
             
             if (px_extent == null) newZ = -9000;
@@ -1142,12 +1149,12 @@ var LBITS = (function()
                 px1 = BITS.c_MercXZtoMercXZ(px_extent[2], px_extent[4], i);
                 py1 = BITS.c_MercXZtoMercXZ(px_extent[3], px_extent[4], i);
                                 
-                if (px1 - px0 < 256 && py1 - py0 < 256)
+                if (px1 - px0 < this.img_width && py1 - py0 < this.img_height)
                 {
-                    _xOut       = px0 >>> 8;
-                    _yOut       = py0 >>> 8;
+                    _xOut       = px0 / this.img_width;
+                    _yOut       = py0 / this.img_height;
                     _zOut       = i;
-                    _isComplete = this.maxZ - i <= 8;
+                    _isComplete = this.maxZ - i <= max_single_index_z;
                     break;
                 }//if
                 else
@@ -1157,10 +1164,9 @@ var LBITS = (function()
                     if (diff < bestDiff)
                     {
                         bestDiff = diff;
-                        _xOut    = px0 >>> 8;
-                        _yOut    = py0 >>> 8;
+                        _xOut    = px0 / this.img_width;
+                        _yOut    = py0 / this.img_height;
                         _zOut    = i;
-                        //if (this._log) console.log("LBITS.FindOptimalSingleIndex: -- [%d] [%d] Diff: %d ... Best: %d... (pxD: %d, pyD: %d)... (%d, %d - %d, %d)", this.layerId, i, diff, bestDiff, px1-px0, py1-py0, px0, py0, px1, py1);
                     }//if
                 }//else
             }//for
@@ -1195,6 +1201,12 @@ var LBITS = (function()
         var txs      = xs != null ? new Uint32Array(xs.length) : null;
         var tys      = ys != null ? new Uint32Array(ys.length) : null;
         
+        if (xs == null || ys == null)
+        {
+            if (this._log) console.log("LBITS.QueryMultiTXYs: [%d] ERR: Failed to decode master tile XYs, returning NULL.", this.layerId);
+            return null;
+        };
+        
         // Loop until max n constraint is met; better resulets with a full extent at a lower resolution.
         while (unique_n > this.idx_max_bitmap_n && destZ > this.minZ+1)
         {
@@ -1224,9 +1236,10 @@ var LBITS = (function()
 //- (int32_t)
     LBITS.prototype.QueryMultiTXYs_GetInitialDestZ = function()
     {
-        var destZ = this.maxZ >= 8 ? this.maxZ - 8 : 0;
-        
-        if (this.hasCompleteSingleIndex || this.maxZ <= 8)
+        var max_single_index_z = LBITS.GetMaxZoomLevelSingleIndexForTileWidthHeightPx(this.img_width, this.img_height); // 2015-08-24 ND: remove hardcoded w/h=256 assumption
+        var destZ              = this.maxZ >= max_single_index_z ? this.maxZ - max_single_index_z : 0;
+
+        if (this.hasCompleteSingleIndex || this.maxZ <= max_single_index_z)
         {
             if (this._log) console.log("LBITS.QueryMultiTXYs: [%d] Already indexed, nothing to do.  Abort.", this.layerId);
             destZ = -1;
@@ -1261,12 +1274,20 @@ var LBITS = (function()
     
         if (bs != null)
         {
-            ox = (bs.x << 8)|0; 
-            oy = (bs.y << 8)|0;
+            ox = bs.x * this.img_width;
+            oy = bs.y * this.img_height;
             var xys = bs.DecomposeIndexIntoXY();
             xs = xys[0]; 
             ys = xys[1];
-            if (this._log) console.log("LBITS.QueryMultiTXYs: [%d] -- Master (%d, %d) @ %d decomposed into %d elements.", this.layerId, ox, oy, this.minZ, xys != null && xys[0] != null ? xys[0].length : -1);
+            
+            var n = xys != null && xys[0] != null ? xys[0].length : 0;
+            
+            if (n == 0) 
+            {
+                bs = null;
+            }//if
+            
+            if (this._log) console.log("LBITS.QueryMultiTXYs: [%d] -- Master (%d, %d) @ %d decomposed into %d elements.", this.layerId, bs.x, bs.y, this.minZ, n);            
         }//if
         
         return bs != null ? [xs, ys, ox, oy] : null;
@@ -1275,25 +1296,27 @@ var LBITS = (function()
 //- (size_t)
     LBITS.prototype.QueryMultiTXYs_DistinctTXYsforPXYs = function(originpx, originpy, pxs, pys, txs, tys, destZ)
     {
-        var i,j,shrn = (((this.minZ+8)|0)-destZ)|0, distinct_n=0;
+        var max_single_index_z = LBITS.GetMaxZoomLevelSingleIndexForTileWidthHeightPx(this.img_width, this.img_height); // 2015-08-24 ND: remove hardcoded w/h=256 assumption
+    
+        var i,j,shrn = this.minZ + max_single_index_z - destZ, distinct_n = 0;
 
-        if (this._log) console.log("LBITS.SelectDistinctTXYforPXY: [%d] pxy@%d is txy@%d.  Need txy @ %d.  So must >>= %d.  Reprojecting...", this.layerId, this.minZ, this.minZ+8, destZ, shrn);
+        if (this._log) console.log("LBITS.SelectDistinctTXYforPXY: [%d] pxy@%d is txy@%d.  Need txy @ %d.  So must >>= %d.  Reprojecting...", this.layerId, this.minZ, this.minZ+max_single_index_z, destZ, shrn);
 
         // translate coordinates
-        for (i=0; i<pxs.length; i=(i+1)|0)
+        for (i=0; i<pxs.length; i++)
         {
-            txs[i] = (((originpx + pxs[i])|0) >>> shrn)|0; 
-            tys[i] = (((originpy + pys[i])|0) >>> shrn)|0;
+            txs[i] = (originpx + pxs[i]) >>> shrn; 
+            tys[i] = (originpy + pys[i]) >>> shrn;
         }//for
         
         // count distinct, overwrite dupes with UINT32_MAX
-        for (i=0; i<(txs.length-1)|0; i=(i+1)|0)
+        for (i = 0; i < txs.length - 1; i++)
         {
             if (txs[i] != 0xFFFFFFFF)
             {
-                for (j=(i+1)|0; j<txs.length; j++)
+                for (j = i + 1; j < txs.length; j++)
                 {
-                    if (        destZ <= this.minZ+1 
+                    if (        destZ <= this.minZ + 1 
                         && distinct_n >  this.idx_max_bitmap_n) 
                     {
                         txs[i] = 0xFFFFFFFF;
@@ -1353,12 +1376,19 @@ var LBITS = (function()
         {
             var ck = this.GetStorageKey(x, y, z);
             cache  = this.net_multithreading ? localStorage.getItem(ck) : this.StorageGet(ck);
-        
+            
             if (cache != null)
             {
                 if (this.net_multithreading)
                 {
-                    this.WorkerDispatchAsync("IV_BITS_E", url, [x, y, z, shouldAutoload, cache]);
+                    if (LBITS.StorageStreamDescriptorVerify(cache, this.img_width, this.img_height))
+                    {
+                        this.WorkerDispatchAsync("IV_BITS_E", url, [x, y, z, shouldAutoload, cache, this.img_width, this.img_height]);
+                    }//if
+                    else
+                    {
+                        cache = null;
+                    }//else
                 }//if
                 else
                 {
@@ -1371,28 +1401,21 @@ var LBITS = (function()
         {
             var url = this.GetTileURL(x, y, z);
             
-            if (this.net_src_png_format)
+            if (!this.img_io_canvas_enable)
             {
-                if (!this.img_io_canvas_enable)
+                if (this.net_multithreading)
                 {
-                    if (this.net_multithreading)
-                    {
-                        var op = this.net_cache_enable ? "GET_BITS_IV_E" : "GET_BITS";
-                        this.WorkerDispatchAsync(op, url, [x, y, z, shouldAutoload, this.img_fx_unshadow, this.img_fx_unstroke, this.img_ch_offset, this.img_alpha_threshold, this.img_unshd_threshold]);
-                    }//if
-                    else
-                    {
-                        this.AddAsync_PNG_URL_libpng(url, x, y, z, shouldAutoload);
-                    }//else
+                    var op = this.net_cache_enable ? "GET_BITS_IV_E" : "GET_BITS";
+                    this.WorkerDispatchAsync(op, url, [x, y, z, shouldAutoload, this.img_fx_unshadow, this.img_fx_unstroke, this.img_ch_offset, this.img_alpha_threshold, this.img_unshd_threshold, this.img_width, this.img_height]);
                 }//if
                 else
                 {
-                    this.AddAsync_PNG_URL_Canvas(url, x, y, z, shouldAutoload);
+                    this.AddAsync_PNG_URL_libpng(url, x, y, z, shouldAutoload);
                 }//else
             }//if
             else
             {
-                this.AddAsync_Hex_URL_Canvas(url, x, y, z, shouldAutoload);
+                this.AddAsync_PNG_ImgURL_Canvas(url, x, y, z, shouldAutoload);
             }//else
         }//if
     };
@@ -1408,67 +1431,53 @@ var LBITS = (function()
     {
         var cubbyLlama = function(response, userData)
         {
-            this.AddBitstoreFromRGBA8888(LBITS.GetNewRGBA8888_FromPNG_libpng(response), x, y, z, shouldAutoload);
+            var rgba = LBITS.GetNewRGBA8888_FromPNG_libpng(response);
+            
+            var     rgba_bytes = rgba.length; // 2015-08-24 ND: verify tile size is as expected
+            var expected_bytes = this.img_width * this.img_height * 4;
+                
+            if (rgba_bytes != expected_bytes)
+            {
+                if (this._log) console.log("LBITS.AddAsync_PNG_URL_libpng: [%d] ERR: RGBA bytes=%d, expected=%d.  Rejecting.", this.layerId, rgba_bytes, expected_bytes);
+            }//if
+            else
+            {
+                this.AddBitstoreFromRGBA8888(rgba, x, y, z, shouldAutoload);
+            }//else
         }.bind(this);
         
         LBITS.GetAsync_HTTP(url, "arraybuffer", null, cubbyLlama, null);
     };
 
-
-//- (void)      HTTP GET a PNG, render to Canvas and extract bytes, then dispatch create BIT.  Uses HTML 5 Canvas + CORS.  Slowest method possible.
-    LBITS.prototype.AddAsync_PNG_URL_Canvas = function(url, x, y, z, shouldAutoload)
+    LBITS.prototype.AddAsync_PNG_ImgURL_Canvas = function(url, x, y, z, shouldAutoload)
     {
-        var getCallback = function(response, userData)
+        var img = new Image();
+        
+        img.onload  = function() 
         {
-            var addCallback = function(rgba, userData)
+            var fail = img.width != this.img_width;//"naturalWidth" in img ? img.naturalwidth != this.img_width : img.width != this.img_width;
+            
+            if (!fail)
             {
-                this.AddBitstoreFromRGBA8888(rgba, x, y, z, shouldAutoload);
-            }.bind(this);
+                var cvs = document.createElement("canvas");
+                var ctx = cvs.getContext("2d");
             
-            this.GetAsyncNewRGBA8888_FromPNG_Canvas(response, addCallback, userData);
+                cvs.width  = img.width;
+                cvs.height = img.height;
+                ctx.drawImage(img, 0, 0);
+                var buf = ctx.getImageData(0, 0, cvs.width, cvs.height);
+                            
+                this.AddBitstoreFromRGBA8888(buf.data, x, y, z, shouldAutoload);
+            }//if
+            else
+            {
+                var tmp_width = "naturalWidth" in img ? img.naturalwidth : img.width;
+                if (this._log) console.log("LBITS.AddAsync_PNG_ImgURL_Canvas: [%d]: ERR: Width=%d, expected %d. (nw=%d, w=%d)", this.layerId, tmp_width, this.img_width, img.naturalWidth, img.width);
+            }//else
         }.bind(this);
         
-        LBITS.GetAsync_HTTP(url, "blob", null, getCallback, null);
-    };
-
-
-//- (void)      Probably will never be used, not much reason to load this from anything but local cache.
-    LBITS.prototype.AddAsync_Hex_URL_Canvas = function(url, x, y, z, shouldAutoload)
-    {
-        var cubbyLlama = function(response, userData)
-        {
-            this.AddBitstoreFromBitmapIndex(LBITS.DecodeBitmapIndexFromHexString(response, null), x, y, z, shouldAutoload);
-        }.bind(this);
-        
-        LBITS.GetAsync_HTTP(url, "text\/plain; charset=x-user-defined", null, cubbyLlama, null);
-    };
-    
-
-// ******************************************************************************************************
-// LBITS -- Net / IO -- GET -> Add BIT Helpers
-// ******************************************************************************************************
-    LBITS.prototype.GetAsyncNewRGBA8888_FromPNG_Canvas = function(srcBlob, fxCallback, userData)
-    {
-        var layerBS = this;
-        var image   = new Image();
-        var canvas  = document.createElement("canvas");
-        var ctx     = canvas.getContext("2d");
-        
-        image.onload = function() 
-        {                
-            canvas.width  = image.width;
-            canvas.height = image.height;
-            
-            ctx.drawImage(image, 0, 0);
-            
-            var ctxBuffer = ctx.getImageData(0, 0, canvas.width, canvas.height);
-
-            window.URL.revokeObjectURL(image.src);
-            
-            fxCallback(ctxBuffer.data, userData);
-        };
-        
-        image.src = window.URL.createObjectURL(srcBlob);
+        img.crossOrigin = "Anonymous";
+        img.src = url;
     };
 
     
@@ -1517,15 +1526,67 @@ var LBITS = (function()
 //- (void)
     LBITS.prototype.StorageSet = function(key_iv, value_i, value_v) 
     {
-        if (this.net_cache_enable) localStorage.setItem(key_iv, value_i+value_v);
+        if (!this.net_cache_enable) return;
+        
+        localStorage.setItem(key_iv, LBITS.StorageStreamDescriptorCreate(this.img_width, this.img_height) + value_i + value_v);
+    };
+
+    LBITS.StorageStreamDescriptorRemove = function(src)
+    {
+        return src != null && src.length >= 10 && src.substring(0, 4) == "BSV3" ? src.substring(8, src.length) : src;
+    };
+    
+    LBITS.StorageStreamDescriptorCreate = function(w, h)
+    {
+        var hdr = "BSV3" + String.fromCharCode(w) + String.fromCharCode(h)
+                         + String.fromCharCode(0) + String.fromCharCode(0);
+        return hdr;
+    };
+
+    LBITS.StorageStreamDescriptorVerify = function(src, w, h)
+    {
+        var match = src != null;
+        
+        if (src != null)
+        {
+            // BSV3 WH__
+            // 0123 4567 8
+            if (src.length == 0) // bad data, doesn't match any format
+            {
+                match = false;
+            }//if
+            else if (src.length >= 10 && src.substring(0, 4) == "BSV3")
+            {
+                var hdr_w = src.charCodeAt(4);
+                var hdr_h = src.charCodeAt(5);
+                
+                match = w == hdr_w && h == hdr_h;
+            }//if
+            else if (w != 256 || h != 256) // no header, assume headerless V2 format, 256x256 only
+            {
+                match = false;
+            }//else
+        }//if
+        
+        return match;
+    };
+    
+    LBITS.StorageStreamDescriptorGetIfVerified = function(src, w, h)
+    {
+        return LBITS.StorageStreamDescriptorVerify(src, w, h) ? LBITS.StorageStreamDescriptorRemove(src) : null;
+    };
+    
+    LBITS.StorageStreamDescriptorGetAndDecodeIfVerified = function(src, w, h)
+    {
+        var dest = LBITS.StorageStreamDescriptorVerify(src, w, h) ? LBITS.StorageStreamDescriptorRemove(src) : null;
+        return dest == null ? null : LBITS.DecodeBitmapIndexFromBinaryString(dest, w, h);
     };
 
 //- (uint16_t*)
     LBITS.prototype.StorageGet = function(key_iv) 
     {
         var    item  = !this.net_cache_enable ? null : localStorage.getItem(key_iv);
-        //return item == null ? null : LBITS.DecodeBitmapIndexFromHexString(item, null); // 2015-02-09 ND: testing more efficient localStorage read
-        return item == null ? null : LBITS.DecodeBitmapIndexFromBinaryString(item);
+        return LBITS.StorageStreamDescriptorGetAndDecodeIfVerified(item, this.img_width, this.img_height);
     };
     
 //- (void)
@@ -1534,19 +1595,22 @@ var LBITS = (function()
         if (bs != null && this.net_cache_enable)
         {
             var ivs = bs.DecomposeIndexIntoIV();
-            if (this._log) console.log("LBITS.AddBitstoreToLocalCache: [%d] Setting cache: (%d, %d) @ %d.... %d len and %d len", this.layerId, bs.x, bs.y, bs.z, ivs[0].length, ivs[1].length);
-            this.StorageSet(this.GetStorageKey(bs.x, bs.y, bs.z), ivs[0], ivs[1]);  
+            if (this._log) console.log("LBITS.AddBitstoreToLocalCache: [%d] Setting cache: (%d, %d) @ %d.... %d len and %d len", this.layerId, bs.x, bs.y, bs.z, ivs != null ? ivs[0].length : -1, ivs != null ? ivs[1].length : -1);
+            if (ivs != null)
+            {
+                this.StorageSet(this.GetStorageKey(bs.x, bs.y, bs.z), ivs[0], ivs[1]);
+            }//if
         }//if
     };
     
 //- (void)
     LBITS.prototype.PurgeOldCacheForLayer = function()
     {
-        var  n = localStorage.length >>> 0;
+        var  n = localStorage.length;
         var ds = "" + this.lastModifiedUnix;
         var mb = this.GetStorageKey(0, 0, 0).substring(0, 10); // bs_iv_vec_
         var ls = this.layerId.toString();
-        var le = (16 + ls.length) >>> 0;
+        var le = 16 + ls.length;
         var tl = new Array();
         var key;
         
@@ -1557,7 +1621,7 @@ var LBITS = (function()
         // 0         1         2
         // 0123456789012345678901234567890
         
-        for (var i=0; i<n; i++)
+        for (var i = 0; i < n; i++)
         {
             key = localStorage.key(i);
 
@@ -1567,17 +1631,18 @@ var LBITS = (function()
                      && key.substring(10, 15) != ds)
                      || key.substring(key.length - 9) != "utf16.txt")) // 2015-02-09 ND: add purge for older 4-bit hex encoding
             {
-                if (this._log) console.log("LBITS.PurgeOldCacheForLayer: [%d] Purging %d bytes: (%s)", this.layerId, localStorage[key].length<<1, key);
+                if (this._log) console.log("LBITS.PurgeOldCacheForLayer: [%d] Purging %d bytes: (%s)", this.layerId, localStorage[key].length << 1, key);
                 
                 tl.push(key);
             }//if
         }//for
         
-        for (var i=0; i<tl.length; i++)
+        for (var i = 0; i < tl.length; i++)
         {
             localStorage.removeItem(tl[i]);
         }//for
     };
+
     
 // ******************************************************************************************************
 // LBITS -- Class (Static) Methods -- Misc
@@ -1636,45 +1701,27 @@ var LBITS = (function()
 // ******************************************************************************************************
 
     // 2015-02-09 ND: Attempt to make this faster by storing binary UTF-16.  Would improve efficiency by > 4x.
-    LBITS.DecodeBitmapIndexFromBinaryString = function(src_iv_str)
+    LBITS.DecodeBitmapIndexFromBinaryString = function(src_iv_str, w, h)
     {
         var i, i_u16 = null, v_u16 = null, dest_i_str = null, dest_v_str = null;
-        var n = src_iv_str.length>>>1;
+        var n = src_iv_str.length >>> 1;
+        var dest_n = (w >>> 2) * (h >>> 2);
         i_u16 = new Uint16Array(n);
         v_u16 = new Uint16Array(n);
         
-        for (i=0; i<n; i++)
+        for (i = 0; i < n; i++)
         {
             i_u16[i] = src_iv_str.charCodeAt(i);
         }//for
         
-        for (i=n; i<src_iv_str.length; i++)
+        for (i = n; i < src_iv_str.length; i++)
         {
             v_u16[i-n] = src_iv_str.charCodeAt(i);
         }//for
-               
-        return LBITS.new_ivtovec_u16(i_u16, v_u16, 4096);
-    };
-    
-// 2015-02-09 ND: legacy hex format only
-//- (uint16_t*)         Accepts separate strings or a combined buffer in src_i_str with values following indices.
-    LBITS.DecodeBitmapIndexFromHexString = function(src_i_str, src_v_str) 
-    {
-        var i_u16 = null, v_u16 = null;
         
-        if (src_v_str != null)
-        {
-            i_u16 = LBITS.new_vhtoi_u16(src_i_str);
-            v_u16 = LBITS.new_vhtoi_u16(src_v_str);
-        }//if
-        else
-        {
-            i_u16 = LBITS.new_vhtoi_u16(src_i_str.substring(0, src_i_str.length>>>1));
-            v_u16 = LBITS.new_vhtoi_u16(src_i_str.substring(src_i_str.length>>>1, src_i_str.length));
-        }//else
-        
-        return LBITS.new_ivtovec_u16(i_u16, v_u16, 4096);
+        return LBITS.new_ivtovec_u16(i_u16, v_u16, dest_n);
     };
+
 
 //- (uint16_t*)     New wrapper for ivtovec_u16
     LBITS.new_ivtovec_u16 = function(srci_u16, srcv_u16, n)
@@ -1706,44 +1753,44 @@ var LBITS = (function()
     };
     
 
-// 2015-02-09 ND: legacy hex format only
-//- (uint16_t*)     New wrapper for vhtoi_u16
-    LBITS.new_vhtoi_u16 = function(src_str)
+    LBITS.GetWorldSizeTiles = function(z)
     {
-        var dest_u16 = new Uint16Array(src_str.length >>> 2);
-        LBITS.vhtoi_u16(dest_u16, src_str);
-        return dest_u16;
+        return 1 << z;
     };
-
-// 2015-02-09 ND: legacy hex format only
-//- (void)      // sets values in uint16_t* buffer dest_u16 converted from string src_str of 4-char base-16 hex values
-    LBITS.vhtoi_u16 = function(dest_u16, src_str)
-    {
-        var i;
-        var dest_n = dest_u16.length >>> 0;
-        var max_i  = dest_n - (dest_n % 4);
     
-        for (i = 0; i < max_i; i += 4)
+    LBITS.GetWorldSizePixels = function(z, tile_px)
+    {
+        return tile_px * LBITS.GetWorldSizeTiles(z);
+    };
+    
+    LBITS.GetMaxZoomLevelSingleIndexForTilePx = function(tile_px)
+    {
+        var z, max_single_index_z = 0;
+        
+        for (z = 21; z >= 0; z--)
         {
-            dest_u16[i  ] = parseInt(("0x" + src_str.substring( i    << 2, ( i    << 2)+4))); 
-            dest_u16[i+1] = parseInt(("0x" + src_str.substring((i+1) << 2, ((i+1) << 2)+4))); 
-            dest_u16[i+2] = parseInt(("0x" + src_str.substring((i+2) << 2, ((i+2) << 2)+4))); 
-            dest_u16[i+3] = parseInt(("0x" + src_str.substring((i+3) << 2, ((i+3) << 2)+4)));
+            if (LBITS.GetWorldSizeTiles(z) <= tile_px)
+            {
+                max_single_index_z = z;
+                break;
+            }//if
         }//for
         
-        for (i = max_i; i < max_i + dest_n % 4; i++)
-        {
-            dest_u16[i] = parseInt(('0x' + src_str.substring(i << 2, (i << 2) + 4)));
-        }//for
+        return max_single_index_z;
+    };
+    
+    LBITS.GetMaxZoomLevelSingleIndexForTileWidthHeightPx = function(tile_w, tile_h)
+    {
+        var max_w = LBITS.GetMaxZoomLevelSingleIndexForTilePx(tile_w);
+        var max_h = LBITS.GetMaxZoomLevelSingleIndexForTilePx(tile_h);
+        
+        return Math.min(max_w, max_h);
     };
 
     // **** END CLASS ****
     
     return LBITS;
 })();
-
-
-
 
 
 
@@ -1786,7 +1833,7 @@ var LBITS = (function()
 var BITS = (function() 
 {
 //- (void)
-    function BITS(layerId, x, y, z, data, isReady)
+    function BITS(layerId, x, y, z, w, h, data, isReady)
     {
         this.layerId  = layerId;         //  int32_t
         this.x        = x;               // uint32_t
@@ -1807,6 +1854,8 @@ var BITS = (function()
         this.img_ch_offset           = 3;       // uint32_t
         this.img_alpha_threshold     = 1;       // uint32_t
         this.img_unshd_threshold     = 1;
+        this.img_width               = w;       // 2015-08-24 ND: remove hardcoded w/h=256 assumption
+        this.img_height              = h;       // 2015-08-24 ND: remove hardcoded w/h=256 assumption
         
         this._log                    = false;   // bool
         
@@ -1859,13 +1908,12 @@ var BITS = (function()
         }//if
     };
 
-
     
 //- (bool)  Extent check -- faster.  Does not check layerId.  Only valid for z >= this.z
     BITS.prototype.CanIndexTile = function(x, y, z, extent_u32)
     {
         if (extent_u32 == null) extent_u32 = BITS.c_GetNewPxExtentVector_u32(x, y, z, this._defExZ);
-
+        
         return !(   extent_u32[2] < this.extent[0] || extent_u32[0] >= this.extent[2]
                  || extent_u32[3] < this.extent[1] || extent_u32[1] >= this.extent[3]);
     };
@@ -1877,21 +1925,27 @@ var BITS = (function()
         var retVal = false;
     
         // 1. Convert tile xy @ z to a pixel xy extent @ idxZ, offset to pixel xy origin of index tile
-        var px0    = BITS.c_MercXZtoMercXZ(  (x << 8)|0,         z, this.z) - (this.x << 8)|0;
-        var py0    = BITS.c_MercXZtoMercXZ(  (y << 8)|0,         z, this.z) - (this.y << 8)|0;
-        var px1    = BITS.c_MercXZtoMercXZ((((x << 8)|0)+255)|0, z, this.z) - (this.x << 8)|0;
-        var py1    = BITS.c_MercXZtoMercXZ((((y << 8)|0)+255)|0, z, this.z) - (this.y << 8)|0;
+        var px0    = BITS.c_MercXZtoMercXZ(x * this.img_width,                        z, this.z) - this.x * this.img_width;
+        var py0    = BITS.c_MercXZtoMercXZ(y * this.img_height,                       z, this.z) - this.y * this.img_height;
+        var px1    = BITS.c_MercXZtoMercXZ(x * this.img_width  + this.img_width  - 1, z, this.z) - this.x * this.img_width;
+        var py1    = BITS.c_MercXZtoMercXZ(y * this.img_height + this.img_height - 1, z, this.z) - this.y * this.img_height;
+
         var bitX;
         var bitIdx;
+        
+        var bit_w = this.img_width >>> 2, yrem, yrsw, bitIdx;
 
         // 3. For the pixels that intersect between the two rects, loop through and see if any of the bits are 1.
-        for (var bitY = py0; bitY <= py1; bitY=(bitY+1)|0) 
+        for (var bitY = py0; bitY <= py1; bitY++) 
         {
-            for (bitX = px0; bitX <= px1; bitX=(bitX+1)|0) 
+            yrsw = (bitY >>> 2) * bit_w;
+            yrem = (bitY - ( (bitY>>>2) << 2)) << 2;
+        
+            for (bitX = px0; bitX <= px1; bitX++) 
             {
-                bitIdx = (((((bitY>>>2)|0)<<6)|0)+((bitX>>>2)|0))|0;
-                                
-                if ((this.data[bitIdx] & (((1<<((((((bitY-((((bitY>>>2)|0)<<2)|0))|0)<<2)|0)+((bitX-((((bitX>>>2)|0)<<2)|0))|0))|0))|0)|0))|0 != 0) // inlined GetBit
+                bitIdx = yrsw + (bitX >>> 2);
+                
+                if ((this.data[bitIdx] & (1 << (yrem + bitX - ((bitX >>> 2) << 2) ))) != 0)
                 {
                     retVal = true;
                     break;
@@ -1914,46 +1968,40 @@ var BITS = (function()
     {
         if (this.extent == null)
         {
-            this.extent = BITS.c_GetNewPxExtentVector_u32(this.x, this.y, this.z, this._defExZ);
+            this.extent = BITS.c_GetNewPxExtentVector_u32(this.x, this.y, this.z, this._defExZ, this.img_width, this.img_height);
         }//if
         else
         {
-            BITS.c_SetPxExtentVector_u32(v, this.x, this.y, this.z, this._defExZ);
+            BITS.c_SetPxExtentVector_u32(v, this.x, this.y, this.z, this._defExZ, this.img_width, this.img_height);
         }//else
         
         this.extent[2] += 1; 
-        this.extent[3] += 1; // compatibility with bad extent in iOS/OSX app (whoops)  
+        this.extent[3] += 1; // compatibility with bad extent in iOS/OSX app (whoops)          
     };
     
 //- (size_t)    http://en.wikipedia.org/wiki/Hamming_weight
     BITS.prototype.GetDataCount = function()
     {
-        return BITS.c_GetDataCount(this.data);
+        return BITS.c_GetDataCount(this.data, this.img_width, this.img_height);
     };
     
-    
-
-
 
 // ******************************************************************************************************
 // BITS -- Bitmap Index R/W
 // ******************************************************************************************************
 
 //- (bool)  returns a boolean value indicating whether the pixel is on or off, for pixel x,y coordinates in a 256,256 tile
-    BITS.prototype.GetBit = function(x,y)
+    BITS.prototype.GetBit = function(x, y)
     {
-        return (this.data[(((((y>>>2)|0)<<6)|0)+((x>>>2)|0))|0] & (((1<<((((((y-((((y>>>2)|0)<<2)|0))|0)<<2)|0)+((x-((((x>>>2)|0)<<2)|0))|0))|0))|0)|0))|0 != 0;
+        return BITS.c_GetBit(this.data, x, y, this.img_width, this.img_height);
     };
     
     
 //- (bool)  same as above, but reuses a precalculated index to reduce ops
-    BITS.prototype.GetBitReusingIdx = function(idx,x,y)
+    BITS.prototype.GetBitReusingIdx = function(idx, x, y)
     {
-        return (this.data[idx] & (((1<<((((((y-((((y>>>2)|0)<<2)|0))|0)<<2)|0)+((x-((((x>>>2)|0)<<2)|0))|0))|0))|0)|0))|0 != 0;
+        return BITS.c_GetBitReusingIdx(this.data, idx, x, y);
     };
-
-
-
 
 
 // ******************************************************************************************************
@@ -1992,7 +2040,7 @@ var BITS = (function()
 //-(void)   Sets/replaces the instance's bitmap index with one newly synthesized from a RGBA8888 tile.
     BITS.prototype.SetBitmapFromRGBA8888Tile = function(src, unshadow, unstroke, ch_offset, alpha_threshold, unshd_threshold)
     {
-        this.data = BITS.GetBitmapFromRGBA8888Tile(src, unshadow, unstroke, ch_offset, alpha_threshold, unshd_threshold);
+        this.data = BITS.GetBitmapFromRGBA8888Tile(src, unshadow, unstroke, ch_offset, alpha_threshold, unshd_threshold, this.img_width, this.img_height);
     };
     
 // ******************************************************************************************************
@@ -2002,14 +2050,14 @@ var BITS = (function()
 //- (uint8_t*)  Returns a 256x256 Planar8 representation of the bitmap, with 1=data_u08 and 0=NODATA_u08
     BITS.prototype.GetNewPlanar8FromBitmap = function(data_u08, NODATA_u08)
     {
-        return BITS.c_GetNewPlanar8FromBitmap(this.data, data_u08, NODATA_u08);
+        return BITS.c_GetNewPlanar8FromBitmap(this.data, data_u08, NODATA_u08, this.img_width, this.img_height);
     };
     
     
 //- (NSMutableArray*)   Returns two vectors of corresponding x and y pixel locations in a 256x256 tile for bits set to on.  x range: [0 ... 255], y range: [0 ... 255]
     BITS.prototype.DecomposeIndexIntoXY = function()
     {
-        return BITS.c_DecomposeIndexIntoXY(this.data);
+        return BITS.c_DecomposeIndexIntoXY(this.data, this.img_width, this.img_height);
     };
     
 
@@ -2020,16 +2068,12 @@ var BITS = (function()
     };
     
     
-    
 //              Used to iteratively refine extent of parent LBITS.
 //- (int32_t*)  Returns the extent of the pixels, rather than the general tile boundaries.  Do *not* set a BIT's extent to this.
     BITS.prototype.GetPixelExtentFromBitstore = function()
     {
-        return BITS.c_GetPixelExtentFromBitstore(this.data);
+        return BITS.c_GetPixelExtentFromBitstore(this.data, this.x, this.y, this.z, this.img_width, this.img_height);
     };
-    
-    
-    
     
     
 // ******************************************************************************************************
@@ -2046,88 +2090,133 @@ var BITS = (function()
     };
 
 
-
     // **************************************************************************************************************
     // ****************************************      CLASS (STATIC) FUNCTIONS      **********************************
     // **************************************************************************************************************
 
 //+ (bool)  returns a boolean value indicating whether the pixel is on or off, for pixel x,y coordinates in a 256,256 tile
-    BITS.c_GetBit = function(src_u16, x, y)
+    BITS.c_GetBit = function(src_u16, x, y, w, h)
     {
-        return (src_u16[(((((y>>>2)|0)<<6)|0)+((x>>>2)|0))|0] & (((1<<((((((y-((((y>>>2)|0)<<2)|0))|0)<<2)|0)+((x-((((x>>>2)|0)<<2)|0))|0))|0))|0)|0))|0 != 0;
+        /*
+        var bit_w = w >>> 2;
+        var idx   = (y >>> 2) * bit_w + (x >>> 2);
+        var xc    =  x - ( (x>>>2) << 2);
+        var yc    = (y - ( (y>>>2) << 2)) << 2;
+        var bit   = 1 << (yc + xc);
+        
+        return (src_u16[idx] & bit) != 0;
+        */
+
+        var bit_w = w >>> 2;
+        var idx   = (y >>> 2) * bit_w + (x >>> 2);
+        
+        return BITS.c_GetBitReusingIdx(src_u16, idx, x, y);
     };
     
 //+ (bool)  same as above, but reuses a precalculated index to reduce ops
     BITS.c_GetBitReusingIdx = function(src_u16, idx, x, y)
     {
-        return (src_u16[idx] & (((1<<((((((y-((((y>>>2)|0)<<2)|0))|0)<<2)|0)+((x-((((x>>>2)|0)<<2)|0))|0))|0))|0)|0))|0 != 0;
+        var xc    =  x - ( (x>>>2) << 2);
+        var yc    = (y - ( (y>>>2) << 2)) << 2;
+        var bit   = 1 << (yc + xc);
+        
+        return (src_u16[idx] & bit) != 0;
     };
 
 
 //+ (size_t)    http://en.wikipedia.org/wiki/Hamming_weight
-    BITS.c_GetDataCount = function(src_u16)
+    BITS.c_GetDataCount = function(src_u16, w, h)
     {
-        var i,x,y,y_width,dc = 0;
+        var dc = 0;
         
-        for (y=0; y<64; y=(y+1))
+        if (src_u16 != null && src_u16.length == (w >>> 2) * (h >>> 2))
         {
-            y_width = (y << 6)|0;
-            
-            for (x=0; x<64; x=(x+1)|0)
+            var bit_w = w >>> 2;
+            var bit_h = h >>> 2;
+            var i,x,y,y_width;
+        
+            for (y = 0; y < bit_h; y++)
             {
-                i = src_u16[(y_width+x)|0];
-                
-                for (i = i | 0; i > 0; i = i >>> 1) 
+                y_width = y * bit_w;
+            
+                for (x = 0; x < bit_w; x++)
                 {
-                    if (i & 1) dc++;
+                    for (i = src_u16[y_width+x]; i > 0; i >>>= 1) 
+                    {
+                        if (i & 1) dc++;
+                    }//for
                 }//for
             }//for
-        }//for
+        }//if
         
         return dc;
     };
 
 //+ (NSMutableArray*)   Returns two vectors of corresponding x and y pixel locations in a 256x256 tile for bits set to on.  x range: [0 ... 255], y range: [0 ... 255]
-    BITS.c_DecomposeIndexIntoXY = function(src_u16)
+    BITS.c_DecomposeIndexIntoXY = function(src_u16, w, h)
     {
-        var dc         = BITS.c_GetDataCount(src_u16);
-        var dest_x_u32 = new Uint32Array(dc);
-        var dest_y_u32 = new Uint32Array(dc);
-        var x,bitIdx,dest_i = 0;
-        
-        for (var y=0; y<256; y=(y+1)|0)
+        var dest_x_u32 = null, dest_y_u32 = null;
+
+        if (src_u16 != null && src_u16.length == (w >>> 2) * (h >>> 2))
         {
-            for (x=0; x<256; x=(x+1)|0)
+            var dc         = BITS.c_GetDataCount(src_u16, w, h);
+            var dest_x_u32 = new Uint32Array(dc);
+            var dest_y_u32 = new Uint32Array(dc);
+            var x,bitIdx,dest_i = 0;
+            var bit_w      = w >>> 2,yrsw,yrem;
+        
+            for (var y = 0; y < h; y++)
             {
-                bitIdx = (((((y>>>2)|0)<<6)|0)+((x>>>2)|0))|0;
-            
-                if ((src_u16[bitIdx] & (((1<<((((((y-((((y>>>2)|0)<<2)|0))|0)<<2)|0)+((x-((((x>>>2)|0)<<2)|0))|0))|0))|0)|0))|0 != 0) // inlined GetBit
+                yrsw = (y >>> 2) * bit_w;
+                yrem = (y - ( (y>>>2) << 2)) << 2;
+
+                for (x = 0; x < w; x++)
                 {
-                    dest_x_u32[dest_i] = x;
-                    dest_y_u32[dest_i] = y;
-                    dest_i             = (dest_i+1)|0;
-                }//if
+                    bitIdx = yrsw + (x >>> 2);
+            
+                    if ((src_u16[bitIdx] & (1 << (yrem + x - ((x >>> 2) << 2) ))) != 0)
+                    {
+                        dest_x_u32[dest_i] = x;
+                        dest_y_u32[dest_i] = y;
+                        dest_i++;
+                    }//if
+                }//for
             }//for
-        }//for
+        }//if
+        else
+        {
+            if (src_u16 == null)
+            {
+                console.log("BITS.c_DecomposeIndexIntoXY: ERR: src_u16 was null.");
+            }//if
+            if (src_u16.length != (w >>> 2) * (h >>> 2))
+            {
+                console.log("BITS.c_DecomposeIndexIntoXY: ERR: src_u16.len=%d, expected=%d (for %d x %d)", src_u16.length, (w >>> 2) * (h >>> 2), w, h);
+            }//if
+        }//else
         
         return [dest_x_u32, dest_y_u32];
     };
 
 
-    BITS.c_GetPixelExtentFromBitstore = function(src_u16, x, y, z)
+//  BITS.c_GetPixelExtentFromBitstore(bs_u16, userData[0],userData[1],userData[2],userData[9],userData[10]);"
+    BITS.c_GetPixelExtentFromBitstore = function(src_u16, tx, ty, z, w, h)
     {
-        var x,y,y_256,dc=0,minX=32767,minY=32767,maxX=-32768,maxY=-32768,bitIdx;
+        var bitIdx,x,y,dc=0,minX=32767,minY=32767,maxX=-32768,maxY=-32768;
+        var bit_w = w >>> 2,yrsw,yrem;
 
-        if (this.data != null) // not worth lazy loading
+        if (src_u16 != null && src_u16.length == (w >>> 2) * (h >>> 2)) // not worth lazy loading
         {
-            for (y=0; y<256; y=(y+1)|0)
+            for (y = 0; y < h; y++)
             {
-                y_256 = (y << 8)|0;
-            
-                for (x=0; x<256; x=(x+1)|0)
+                yrsw = (y >>> 2) * bit_w;
+                yrem = (y - ( (y>>>2) << 2)) << 2;
+                
+                for (x = 0; x < w; x++)
                 {
-                    bitIdx = (((((y>>>2)|0)<<6)|0)+((x>>>2)|0))|0;
-                    if ((src_u16[bitIdx] & (((1<<((((((y-((((y>>>2)|0)<<2)|0))|0)<<2)|0)+((x-((((x>>>2)|0)<<2)|0))|0))|0))|0)|0))|0 != 0) // inlined GetBit
+                    bitIdx = yrsw + (x >>> 2);
+                    
+                    if ((src_u16[bitIdx] & (1 << (yrem + x - ((x >>> 2) << 2) ))) != 0)
                     {
                         if (y > maxY) maxY = y;
                         if (y < minY) minY = y;
@@ -2140,10 +2229,10 @@ var BITS = (function()
 
         if (minX == 32767 && minY == 32767 && maxX == -32768 && maxY == -32768) 
         { 
-            minX = 0; 
-            minY = 0; 
-            maxX = 256; 
-            maxY = 256; 
+            minX = 0;
+            minY = 0;
+            maxX = w;
+            maxY = h;
         }//if
 
         var results = new Uint32Array(8);
@@ -2153,8 +2242,8 @@ var BITS = (function()
         results[3] = maxY;
         results[4] = z;
         results[5] = z;
-        results[6] = x;
-        results[7] = y;
+        results[6] = tx;
+        results[7] = ty;
 
         return results;
     };
@@ -2169,9 +2258,9 @@ var BITS = (function()
     
         var dest_i_str = "", dest_v_str = "";
         
-        for (var i=0; i<4096; i=(i+1)|0)
+        for (var i = 0; i < src_u16.length; i++)
         {
-            if (src_u16[i] != 0) // inlined
+            if (src_u16[i] != 0)
             {
                 dest_i_str += String.fromCharCode(i);
                 dest_v_str += String.fromCharCode(src_u16[i]);
@@ -2180,40 +2269,17 @@ var BITS = (function()
         
         return [dest_i_str, dest_v_str];  
     };
-
-    // 2015-02-09 ND: renamed original, unused
-    BITS.c_DecomposeIndexIntoIV_LegacyHexString = function(src_u16)
+    
+    
+    BITS.c_GetNewPlanar8FromBitmap = function(src_u16, data_u08, NODATA_u08, w, h)
     {
         if (src_u16 == null)
         {
+            console.log("BITS.c_GetNewPlanar8FromBitmap: ERR: src_u16 was NULL!");
             return null;
         }//if
-    
-        var dest_i_str = "", dest_v_str = "";
-        
-        for (var i=0; i<4096; i=(i+1)|0)
-        {
-            if (src_u16[i] != 0) // inlined
-            {
-                dest_i_str += i < 0x0010 ? "000" + i.toString(16) 
-                            : i < 0x0100 ?  "00" + i.toString(16) 
-                            : i < 0x1000 ?   "0" + i.toString(16) 
-                            :                      i.toString(16);
-                            
-                dest_v_str += src_u16[i] < 0x0010 ? "000" + src_u16[i].toString(16) 
-                            : src_u16[i] < 0x0100 ?  "00" + src_u16[i].toString(16) 
-                            : src_u16[i] < 0x1000 ?   "0" + src_u16[i].toString(16) 
-                            :                               src_u16[i].toString(16);
-            }//if
-        }//for
-        
-        return [dest_i_str, dest_v_str];  
-    };
-    
-    
-    BITS.c_GetNewPlanar8FromBitmap = function(src_u16, data_u08, NODATA_u08)
-    {
-        var x,y,y_256,dest_u08 = new Uint8Array(65536);
+
+        var x,y,dest_u08 = new Uint8Array(w * h);
         
         if (NODATA_u08 != 0) 
         { 
@@ -2223,20 +2289,22 @@ var BITS = (function()
             }//for 
         }//if
         
-        for (y=0; y<256; y++)
+        var bit_w = w >>> 2;
+        var bitIdx,yrsw,yrem;
+        
+        for (y = 0; y < h; y++)
         {
-            y_256 = y << 8;
+            yrsw = (y >>> 2) * bit_w;
+            yrem = (y - ( (y>>>2) << 2)) << 2;
             
-            for (x=0; x<256; x+=8) // loop unroll
-            {
-                if (BITS.c_GetBit(src_u16, x,   y)) dest_u08[(y_256)+x  ] = data_u08;
-                if (BITS.c_GetBit(src_u16, x+1, y)) dest_u08[(y_256)+x+1] = data_u08;
-                if (BITS.c_GetBit(src_u16, x+2, y)) dest_u08[(y_256)+x+2] = data_u08;
-                if (BITS.c_GetBit(src_u16, x+3, y)) dest_u08[(y_256)+x+3] = data_u08;
-                if (BITS.c_GetBit(src_u16, x+4, y)) dest_u08[(y_256)+x+4] = data_u08;
-                if (BITS.c_GetBit(src_u16, x+5, y)) dest_u08[(y_256)+x+5] = data_u08;
-                if (BITS.c_GetBit(src_u16, x+6, y)) dest_u08[(y_256)+x+6] = data_u08;
-                if (BITS.c_GetBit(src_u16, x+7, y)) dest_u08[(y_256)+x+7] = data_u08;
+            for (x = 0; x < w; x++)
+            {  
+                bitIdx = yrsw + (x >>> 2);
+            
+                if ((src_u16[bitIdx] & (1 << (yrem + x - ((x >>> 2) << 2) ))) != 0)
+                {
+                    dest_u08[y*w+x] = data_u08;
+                }//if
             }//for
         }//for
     
@@ -2245,43 +2313,52 @@ var BITS = (function()
 
 
 //+(uint16_t)   Sets/replaces the instance's bitmap index with one newly synthesized from a RGBA8888 tile.
-    BITS.GetBitmapFromRGBA8888Tile = function(src, unshadow, unstroke, ch_offset, alpha_threshold, unshd_threshold)
+    BITS.GetBitmapFromRGBA8888Tile = function(src, unshadow, unstroke, ch_offset, alpha_threshold, unshd_threshold, w, h)
     {
         var dest = null;
-    
-        if (src != null)
+        
+        if (src != null && src.length == (w * h) << 2)
         {
-            dest = new Uint16Array(4096);
+            var bit_w = w >>> 2;
+            var bit_h = h >>> 2;
+
+            dest = new Uint16Array(bit_w * bit_h);
 
             if (unshadow) 
             {
-                BITS.RecoverShadowAlphaInRGBA8888Tile(src, ch_offset, alpha_threshold, unshd_threshold);
+                BITS.RecoverShadowAlphaInRGBA8888Tile(src, ch_offset, alpha_threshold, unshd_threshold, w, h);
             }//if
             
             if (unstroke)
             {
                 var backup = new Uint8Array(src);
-                BITS.RecoverDStrokeInRGBA8888Tile(src, backup, ch_offset, alpha_threshold);
-                BITS.RecoverXStrokeInRGBA8888Tile(src, backup, ch_offset, alpha_threshold);
-                BITS.RecoverYStrokeInRGBA8888Tile(src, backup, ch_offset, alpha_threshold);
+                BITS.RecoverDStrokeInRGBA8888Tile(src, backup, ch_offset, alpha_threshold, w, h);
+                BITS.RecoverXStrokeInRGBA8888Tile(src, backup, ch_offset, alpha_threshold, w, h);
+                BITS.RecoverYStrokeInRGBA8888Tile(src, backup, ch_offset, alpha_threshold, w, h);
                 backup = null;
             }//if
             
-            var x, bsX, bsY_64 = 0;
-    
-            for (var y = 0; y < 256; y = (y+4)|0)
+            var x, bsX, bsY_bW = 0;
+            var bpr = w * 4;
+
+            for (var y = 0; y < h; y+=4)
             {
                 bsX = 0;
                 
-                for (x = 0; x < 1024; x = (x+16)|0)
+                for (x = 0; x < bpr; x+=16)
                 {
-                    dest[(bsY_64+bsX)|0] = BITS.GetBitmapCellFromPlanarTile_u16(src, x, y, ch_offset, 4, alpha_threshold);
+                    dest[bsY_bW+bsX] = BITS.GetBitmapCellFromPlanarTile_u16(src, x, y, ch_offset, 4, alpha_threshold, w, h, bpr);
                     bsX++;
                 }//for
             
-                bsY_64 = (bsY_64+64)|0;
+                bsY_bW += bit_w;
             }//for
         }//if
+        else
+        {
+            if (src == null) console.log("BITS.GetBitmapFromRGBA8888Tile: ERR: src was NULL!");
+            if (src.length != (w * h) << 2) console.log("BITS.GetBitmapFromRGBA8888Tile: ERR: src.length=%d, expected %d!", src.length, (w * h) << 2);
+        }//else
         
         return dest;
     };
@@ -2297,7 +2374,7 @@ var BITS = (function()
     };
 
 //+ (void)  Sets the ch_offset (alpha) value to 0 when R, G and B pixels are all below alpha_threshold.
-    BITS.RecoverShadowAlphaInRGBA8888Tile = function(src, ch_offset, alpha_threshold, unshd_threshold)
+    BITS.RecoverShadowAlphaInRGBA8888Tile = function(src, ch_offset, alpha_threshold, unshd_threshold, w, h)
     {
         if (src != null)
         {
@@ -2306,24 +2383,25 @@ var BITS = (function()
             var rc = rgbac[0];
             var gc = rgbac[1];
             var bc = rgbac[2];
-            alpha_threshold = (alpha_threshold - 1)|0;
+            alpha_threshold--;
 
             var x, y_width, y_width_x;
+            var bpr = w * 4;
 
-            for (var y = 0; y < 256; y=(y+1)|0)
+            for (var y = 0; y < h; y++)
             {
-                y_width = (y << 10)|0;
+                y_width = y * bpr;
                 
-                for (x = 0; x < 1024; x=(x+4)|0)
+                for (x = 0; x < bpr; x+=4)
                 {
-                    y_width_x = (y_width + x)|0;
+                    y_width_x = y_width + x;
                 
-                    if (src[(y_width_x + ac)|0]  > alpha_threshold
-                     && src[(y_width_x + rc)|0] <= unshd_threshold
-                     && src[(y_width_x + gc)|0] <= unshd_threshold
-                     && src[(y_width_x + bc)|0] <= unshd_threshold)
+                    if (src[y_width_x + ac]  > alpha_threshold
+                     && src[y_width_x + rc] <= unshd_threshold
+                     && src[y_width_x + gc] <= unshd_threshold
+                     && src[y_width_x + bc] <= unshd_threshold)
                     {
-                        src[(y_width_x + ac)|0] = 0;
+                        src[y_width_x + ac] = 0;
                     }//if
                 }//for
             }//for
@@ -2331,7 +2409,7 @@ var BITS = (function()
     };
 
 //+ (void)  Partially recovers the alpha channel from a 2x2 NODATA fill.
-    BITS.RecoverXStrokeInRGBA8888Tile = function(dest, src, ch_offset, alpha_threshold)
+    BITS.RecoverXStrokeInRGBA8888Tile = function(dest, src, ch_offset, alpha_threshold, w, h)
     {
         if (src != null)
         {
@@ -2340,22 +2418,21 @@ var BITS = (function()
             var rc = rgbac[0];
             var gc = rgbac[1];
             var bc = rgbac[2];
-            alpha_threshold = (alpha_threshold - 1)|0;
+            alpha_threshold--;
             var x, y_width, y_width_x;
+            var bpr = w * 4;
             
-            for (var y = 0; y < 256; y=(y+1)|0)
+            for (var y = 0; y < h; y++)
             {
-                y_width = (y<<10)|0;
+                y_width = y * bpr;
                 
-                for (x = 4; x < 1020; x=(x+4)|0)
+                for (x = 4; x < bpr - 4; x+=4)
                 {
-                    y_width_x = (y_width + x)|0;
-                
-                    if (   src[(  y_width_x         + ac)|0]  > alpha_threshold
-                        && src[(((y_width_x - 4)|0) + ac)|0]  > alpha_threshold
-                        && src[(((y_width_x + 4)|0) + ac)|0] <= alpha_threshold)
+                    if (   src[ y_width_x      + ac]  > alpha_threshold
+                        && src[(y_width_x - 4) + ac]  > alpha_threshold
+                        && src[(y_width_x + 4) + ac] <= alpha_threshold)
                     {
-                          dest[(  y_width_x         + ac)|0] = 0;
+                          dest[ y_width_x      + ac] = 0;
                     }//if
                 }//for
             }//for
@@ -2363,7 +2440,7 @@ var BITS = (function()
     };
     
 //+ (void)  Partially recovers the alpha channel from a 2x2 NODATA fill.
-    BITS.RecoverYStrokeInRGBA8888Tile = function(dest, src, ch_offset, alpha_threshold)
+    BITS.RecoverYStrokeInRGBA8888Tile = function(dest, src, ch_offset, alpha_threshold, w, h)
     {
         if (src != null)
         {
@@ -2373,17 +2450,19 @@ var BITS = (function()
             var rc = rgbac[0];
             var gc = rgbac[1];
             var bc = rgbac[2];
-            alpha_threshold = (alpha_threshold - 1)|0;
+            alpha_threshold--;
+            
+            var bpr = w * 4;
 
-            for (var y = 1; y < 255; y=(y+1)|0)
+            for (var y = 1; y < h - 1; y++)
             {
-                for (x = 0; x < 1024; x=(x+4)|0)
+                for (x = 0; x < bpr; x+=4)
                 {
-                    if (   src[((((  (y      <<10)|0) + x)|0) + ac)|0] >  alpha_threshold
-                        && src[(((((((y-1)|0)<<10)|0) + x)|0) + ac)|0] >  alpha_threshold
-                        && src[(((((((y+1)|0)<<10)|0) + x)|0) + ac)|0] <= alpha_threshold)
+                    if (   src[ y   *bpr + x + ac] >  alpha_threshold
+                        && src[(y-1)*bpr + x + ac] >  alpha_threshold
+                        && src[(y+1)*bpr + x + ac] <= alpha_threshold)
                     {                        
-                          dest[((((  (y      <<10)|0) + x)|0) + ac)|0] = 0;
+                          dest[ y   *bpr + x + ac] = 0;
                     }//if
                 }//for
             }//for
@@ -2391,7 +2470,7 @@ var BITS = (function()
     };
     
 //+ (void)  Partially recovers the alpha channel from a 2x2 NODATA fill.
-    BITS.RecoverDStrokeInRGBA8888Tile = function(dest, src, ch_offset, alpha_threshold)
+    BITS.RecoverDStrokeInRGBA8888Tile = function(dest, src, ch_offset, alpha_threshold, w, h)
     {
         if (src != null)
         {
@@ -2401,121 +2480,131 @@ var BITS = (function()
             var rc = rgbac[0];
             var gc = rgbac[1];
             var bc = rgbac[2];
-            alpha_threshold = (alpha_threshold - 1)|0;
+            alpha_threshold--;
+            
+            var bpr = w * 4;
 
-            for (var y = 1; y < 255; y=(y+1)|0)
+            for (var y = 1; y < h - 1; y++)
             {
-                for (x = 4; x < 1020; x=(x+4)|0)
+                for (x = 4; x < bpr - 4; x+=4)
                 {
-                    if (   src[((((  (y      <<10)|0) +   x  )|0)     + ac)|0] >  alpha_threshold
-                        && src[(((((((y-1)|0)<<10)|0) + ((x-4)|0))|0) + ac)|0] >  alpha_threshold
-                        && src[(((((((y+1)|0)<<10)|0) + ((x+4)|0))|0) + ac)|0] <= alpha_threshold)
+                    if (   src[ y   *bpr + x   + ac] >  alpha_threshold
+                        && src[(y-1)*bpr + x-4 + ac] >  alpha_threshold
+                        && src[(y+1)*bpr + x+4 + ac] <= alpha_threshold)
                     {                        
-                          dest[((((  (y      <<10)|0) +   x  )|0)     + ac)|0]  = 0;
+                          dest[ y   *bpr + x   + ac]  = 0;
                     }//if
                 }//for
             }//for
         }//if
     };
-
-
-
-
-
-
-
 
 
     // returns uint16_t scalar value of cell, intened to then be set in the uint16_t* bitmap index vector.
     // this is synthesized from 4x4 cells (16 total) from the 256x256 source tile src.
     
 //+ (uint16_t)
-    BITS.GetBitmapCellFromPlanarTile_u16 = function(src, x, y, offset, stride, threshold)
+    BITS.GetBitmapCellFromPlanarTile_u16 = function(src, x, y, offset, stride, threshold, w, h, bytes_per_row)
     {
-        var bitX,bitY_256,idxCount=0,cellValue=0;
-        threshold = (threshold - 1)|0;
-    
-        for (var bitY = y; bitY < (y + 4)|0; bitY=(bitY+1)|0)
-        {
-            bitY_256 = (((bitY * 256)|0) * stride)|0;
+        var cellValue = 0;
         
-            for (bitX = x; bitX < (x + (4 * stride)|0)|0; bitX=(bitX+stride)|0)
-            {
-                if (src[((bitY_256 + bitX)|0 + offset)|0] > threshold)
-                {
-                    cellValue = (cellValue | ((1 << idxCount)|0))|0;
-                }//if
-            
-                idxCount = (idxCount + 1)|0;
-            }//for
-        }//for
+        if (src != null && src.length == bytes_per_row * h)
+        {
+            var bitX,bitY_width,idxCount=0;
+        
+            threshold--;
     
-        return cellValue;
+            for (var bitY = y; bitY < y + 4; bitY++)
+            {
+                bitY_width = bitY * w * stride;
+        
+                for (bitX = x; bitX < x + 4 * stride; bitX+=stride)
+                {
+                    if (src[bitY_width + bitX + offset] > threshold)
+                    {
+                        cellValue |= 1 << idxCount;
+                    }//if
+            
+                    idxCount++;
+                }//for
+            }//for
+        
+            return cellValue;
+        }//if
+        else
+        {
+            if (src == null)
+            {
+                console.log("BITS.GetBitmapCellFromPlanarTile_u16: ERR: src was NULL!");
+            }
+            else
+            {
+                console.log("BITS.GetBitmapCellFromPlanarTile_u16: ERR: src.length=%d, expected=%d!", src.length, bytes_per_row*h);
+            }
+        }
     };
     
 
 //+ (void*)     Primary coordinate system reprojection function, for EPSG3857 pixel or tile x/y at different zoom levels.
     BITS.c_MercXZtoMercXZ = function(x, z, dest_z)
     {
-        return dest_z > z ? (x << ((dest_z - z)|0))|0 : (x >>> ((z - dest_z)|0))|0;
+        return dest_z > z ? x << (dest_z - z) : x >>> (z - dest_z);
     };
     
     
 //+ (void)  Variant of above, for uint32_t extent vector.  Reprojects both 4 vertices from z=v[5] to z=v[6]
     BITS.c_vMercXYZtoMercXYZ_u32 = function(v)
     {
-        // v[0] = BITS.c_MercXZtoMercXZ(v[0], v[5], v[4]); // <-- doesn't always work, FP magnitude errors outside array for z=23
         if (v[4] > v[5])
         {
-            v[0] = (v[0] << (v[4] - v[5])|0)|0;
-            v[1] = (v[1] << (v[4] - v[5])|0)|0;
-            v[2] = (v[2] << (v[4] - v[5])|0)|0;
-            v[3] = (v[3] << (v[4] - v[5])|0)|0;
+            v[0] = v[0] << (v[4] - v[5]);
+            v[1] = v[1] << (v[4] - v[5]);
+            v[2] = v[2] << (v[4] - v[5]);
+            v[3] = v[3] << (v[4] - v[5]);
         }//if
         else
         {
-            v[0] = (v[0] >>> (v[5] - v[4])|0)|0;
-            v[1] = (v[1] >>> (v[5] - v[4])|0)|0;
-            v[2] = (v[2] >>> (v[5] - v[4])|0)|0;
-            v[3] = (v[3] >>> (v[5] - v[4])|0)|0;
+            v[0] = v[0] >>> (v[5] - v[4]);
+            v[1] = v[1] >>> (v[5] - v[4]);
+            v[2] = v[2] >>> (v[5] - v[4]);
+            v[3] = v[3] >>> (v[5] - v[4]);
         }//else
     };
     
 
     
 //+ (uint32_t*)     New wrapper for c_SetPxExtentVector_u32.
-    BITS.c_GetNewPxExtentVector_u32 = function(x, y, z, dest_z)
+    BITS.c_GetNewPxExtentVector_u32 = function(x, y, z, dest_z, w, h)
     {
         var v = new Uint32Array(6);
-        BITS.c_SetPxExtentVector_u32(v, x, y, z, dest_z);
+        BITS.c_SetPxExtentVector_u32(v, x, y, z, dest_z, w, h);
         return v;
     };
     
     
 //+ (void)      Fills rectangular coordinates @ dest_z represented by input tile x,y @ z.  Use with Uint32Array.
-    BITS.c_SetPxExtentVector_u32 = function(v, x, y, z, dest_z)
+    BITS.c_SetPxExtentVector_u32 = function(v, x, y, z, dest_z, w, h)
     {
-        v[0] = (x << 8)|0;
-        v[1] = (y << 8)|0;
+        v[0] = x * w;
+        v[1] = y * h;
+
         v[4] = dest_z;
         v[5] = z;
     
-        v[2] = 256;                                                  // width
-        v[2] = (BITS.c_MercXZtoMercXZ(v[2], v[5], v[4]) - 1)|0;      // -1 for 0-based index
+        v[2] = w;                                                    // width
+        v[2] = BITS.c_MercXZtoMercXZ(v[2], v[5], v[4]) - 1;          // -1 for 0-based index
         v[3] = v[2];                                                 // copy to height, same
     
         v[0] = BITS.c_MercXZtoMercXZ(v[0], v[5], v[4]);              // reproject origin x/y
         v[1] = BITS.c_MercXZtoMercXZ(v[1], v[5], v[4]);
     
-        v[2] = (v[2] + v[0])|0;                                      // reproject end point x/y, width  - x0
-        v[3] = (v[3] + v[1])|0;                                      //                          height - y0
+        v[2] = v[2] + v[0];                                          // reproject end point x/y, width  - x0
+        v[3] = v[3] + v[1];                                          //                          height - y0
     };
-    
-    
-    
+        
     
 //+ (void)  Proprietary, for use with GetPixelExtentFromBitstore.  Converts its output to a map extent vector, in place.
-    BITS.c_vPixelExtentToMercExtent_u32 = function(v)
+    BITS.c_vPixelExtentToMercExtent_u32 = function(v, w, h)
     {
         if (v == null || v.length < 7)
         {
@@ -2537,10 +2626,10 @@ var BITS = (function()
         
         var dest_z = BITS.c_GetDefaultExtentZoomLevel(); // new zoom level for extent
         
-        v[0] += v[6] << 8;  // offset by tile x/y in pixels at original zoom level
-        v[1] += v[7] << 8;
-        v[2] += v[6] << 8;
-        v[3] += v[7] << 8;
+        v[0] += v[6] * w;  // offset by tile x/y in pixels at original zoom level
+        v[1] += v[7] * h;
+        v[2] += v[6] * w;
+        v[3] += v[7] * h;
         
         v[4]  = dest_z;     // set the destination zoom level for the reprojection
         
@@ -2550,7 +2639,7 @@ var BITS = (function()
 //+ (void)  Constant with a k.  If you set this lower than max zoom level of the map, you're not gonna have a good time.    
     BITS.c_GetDefaultExtentZoomLevel = function()
     {
-        return 23;
+        return 21;
     };
     
     return BITS;
