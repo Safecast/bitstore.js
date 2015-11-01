@@ -109,6 +109,7 @@
 
 // Revision History
 // ----------------
+// 2015-10-31 ND: Bugfix for bad index tile selection in certain cases.
 // 2015-09-01 ND: Support 512x512 tiles, performance improvements, code cleanup.
 //
 //                1. Tile width and height can now be specified in an LBITSOptions object.  Width/height are assumed equal,
@@ -1208,7 +1209,8 @@ var LBITS = (function()
         };
         
         // Loop until max n constraint is met; better resulets with a full extent at a lower resolution.
-        while (unique_n > this.idx_max_bitmap_n && destZ > this.minZ+1)
+        // 2015-10-31 ND: this.minZ+1 -> this.minZ
+        while (unique_n > this.idx_max_bitmap_n && destZ > this.minZ)
         {
             unique_n = this.QueryMultiTXYs_DistinctTXYsforPXYs(uberX,uberY,xs,ys,txs,tys,destZ);
 
@@ -1224,10 +1226,21 @@ var LBITS = (function()
             destZ--;
         }//while
         
-        if (txs != null)
+        // 2015-10-31 ND: catch unique_n exceptions here
+        if (txs != null && unique_n != 0xFFFFFFFF && unique_n > 0)
         {
+            if (this._log) console.log(txs);
+            if (this._log) console.log(tys);
+        
             xs.set(txs); 
             ys.set(tys);
+        }//if
+        
+        // 2015-10-31 ND: catch fallthrough if no attempt was made to loop
+        if (unique_n == 0xFFFFFFFF)
+        {
+            xs = null;
+            ys = null;
         }//if
         
         return [xs, ys, destZ];
